@@ -91,7 +91,7 @@ export const noRenderInRender = defineRule({
   severity: "warn",
   tags: ["test-noise"],
   recommendation:
-    "Make it a named component so React preserves its identity and does not remount its state.",
+    "Make it a named component rendered as JSX so React can track it and preserve its state.",
   create: (context: RuleContext) => ({
     JSXExpressionContainer(node: EsTreeNodeOfType<"JSXExpressionContainer">) {
       const expression = node.expression;
@@ -99,23 +99,27 @@ export const noRenderInRender = defineRule({
 
       let calleeName: string | null = null;
       if (isNodeOfType(expression.callee, "Identifier")) {
-        if (tracesToPropOrParameter(context.scopes.symbolFor(expression.callee), context.scopes)) {
-          return;
-        }
         calleeName = expression.callee.name;
       } else if (
         isNodeOfType(expression.callee, "MemberExpression") &&
         isNodeOfType(expression.callee.property, "Identifier")
       ) {
-        if (rootsInProps(expression.callee.object, context.scopes)) return;
         calleeName = expression.callee.property.name;
       }
 
       if (!calleeName || !RENDER_FUNCTION_PATTERN.test(calleeName)) return;
 
+      if (isNodeOfType(expression.callee, "Identifier")) {
+        if (tracesToPropOrParameter(context.scopes.symbolFor(expression.callee), context.scopes)) {
+          return;
+        }
+      } else if (isNodeOfType(expression.callee, "MemberExpression")) {
+        if (rootsInProps(expression.callee.object, context.scopes)) return;
+      }
+
       context.report({
         node: expression,
-        message: `Your users lose state because "${calleeName}()" builds UI from an inline call that React remounts, so pull it into its own component instead.`,
+        message: `"${calleeName}()" hides a component behind an inline call, so pull it into its own component and render it as JSX so React can track it.`,
       });
     },
   }),

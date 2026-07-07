@@ -7,6 +7,7 @@ import { isReactComponentOrHookName } from "../../utils/is-react-component-or-ho
 import { isReactHookName } from "../../utils/is-react-hook-name.js";
 import { REACT_HOC_NAMES } from "../../constants/react.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
+import { isImportedFromNonReactModule } from "../../utils/is-imported-from-non-react-module.js";
 import { isReactHocCallbackArgument } from "../../utils/is-react-hoc-callback-argument.js";
 import { walkAst } from "../../utils/walk-ast.js";
 
@@ -550,7 +551,13 @@ const isInsideClassComponent = (node: EsTreeNode): boolean => {
 const hasShortCircuitAncestor = (descendant: EsTreeNode, ancestor: EsTreeNode): boolean => {
   let current: EsTreeNode | null | undefined = descendant.parent;
   while (current && current !== ancestor) {
-    if (isNodeOfType(current, "ConditionalExpression")) return true;
+    if (
+      isNodeOfType(current, "ConditionalExpression") &&
+      (isWithinRange(descendant, current.consequent) ||
+        isWithinRange(descendant, current.alternate))
+    ) {
+      return true;
+    }
     if (
       isNodeOfType(current, "LogicalExpression") &&
       (current.operator === "&&" || current.operator === "||" || current.operator === "??") &&
@@ -618,6 +625,25 @@ const isUseEffectEventSymbol = (symbol: SymbolDescriptor): boolean => {
   const initializer = symbol.initializer;
   if (!initializer || !isNodeOfType(initializer, "CallExpression")) return false;
   return getHookNameFromCallee(initializer.callee) === "useEffectEvent";
+};
+
+// React's effect-event semantics (call-only, never stored or passed around)
+// apply to React's own `useEffectEvent`. A same-named hook EXPLICITLY imported
+// from another package — e.g. `@rocket.chat/fuselage-hooks`, whose
+// `useEffectEvent` is a stable-callback helper designed to be passed as props —
+// carries different semantics, so applying these reports would be a false
+// positive. A bare/unimported `useEffectEvent` is still treated as React's to
+// preserve parity with eslint-plugin-react-hooks.
+const isNonReactEffectEventCallee = (callee: EsTreeNode, contextNode: EsTreeNode): boolean =>
+  isNodeOfType(callee, "Identifier") && isImportedFromNonReactModule(contextNode, callee.name);
+
+const isNonReactEffectEventSymbol = (
+  symbol: SymbolDescriptor,
+  contextNode: EsTreeNode,
+): boolean => {
+  const initializer = symbol.initializer;
+  if (!initializer || !isNodeOfType(initializer, "CallExpression")) return false;
+  return isNonReactEffectEventCallee(initializer.callee, contextNode);
 };
 
 const findEnclosingComponentOrHookFunction = (node: EsTreeNode): EsTreeNode | null => {
@@ -714,7 +740,11 @@ export const rulesOfHooks = defineRule({
         if (!hookContext) return;
         const { hookName } = hookContext;
 
-        if (hookName === "useEffectEvent" && !isUseEffectEventInitializer(node)) {
+        if (
+          hookName === "useEffectEvent" &&
+          !isUseEffectEventInitializer(node) &&
+          !isNonReactEffectEventCallee(node.callee, node)
+        ) {
           context.report({ node: node.callee, message: buildEffectEventPassedDownMessage() });
           return;
         }
@@ -768,6 +798,7 @@ export const rulesOfHooks = defineRule({
             if (parentInfo.isComponentOrHook) isInsideComponentOrHook = true;
           }
           if (!isInsideComponentOrHook) {
+            if (!enclosing.hasResolvedName) return;
             if (isLocalNonHookFunctionCallee(node, context.scopes, settings)) return;
             context.report({
               node: node.callee,
@@ -841,6 +872,7 @@ export const rulesOfHooks = defineRule({
         const reference = context.scopes.referenceFor(node);
         const symbol = reference?.resolvedSymbol;
         if (!symbol || !isUseEffectEventSymbol(symbol)) return;
+        if (isNonReactEffectEventSymbol(symbol, node)) return;
         if (!isSameComponentOrHookScope(symbol, node)) return;
         if (isInsideAllowedEffectEventCallback(node, additionalEffectHooksRegex)) return;
 
