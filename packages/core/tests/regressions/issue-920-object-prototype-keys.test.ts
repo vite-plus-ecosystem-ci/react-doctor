@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { detectForeignDisableNearMiss } from "../../src/detect-foreign-disable-near-miss.js";
 
 describe("regression: issue #920 - Object.prototype key collision in disable comments", () => {
