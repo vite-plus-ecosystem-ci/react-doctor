@@ -1,10 +1,11 @@
 import type { EsTreeNode } from "../../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../../utils/es-tree-node-of-type.js";
 import { findVariableInitializer } from "../../../utils/find-variable-initializer.js";
+import { getStaticPropertyName } from "../../../utils/get-static-property-name.js";
 import { isNodeOfType } from "../../../utils/is-node-of-type.js";
 import { stripParenExpression } from "../../../utils/strip-paren-expression.js";
 
-const ZOD_MODULE = "zod";
+export const ZOD_MODULE_SOURCES: ReadonlyArray<string> = ["zod", "zod/v4"];
 
 interface ZodImportInfo {
   imported: string | null;
@@ -17,18 +18,23 @@ interface MethodCall {
   receiver: EsTreeNode;
 }
 
-export const getStaticPropertyName = (
-  member: EsTreeNodeOfType<"MemberExpression">,
-): string | null => {
-  const property = member.property as EsTreeNode;
-  if (!member.computed && isNodeOfType(property, "Identifier")) return property.name;
-  if (member.computed && isNodeOfType(property, "Literal") && typeof property.value === "string") {
-    return property.value;
-  }
-  return null;
-};
+export { getStaticPropertyName } from "../../../utils/get-static-property-name.js";
+
+// The classification is a pure function of the identifier node within its
+// (immutable) file, and every zod rule re-queries the same identifiers —
+// memoize per node; `has()` distinguishes a cached null from a miss.
+const importInfoCache = new WeakMap<EsTreeNode, ZodImportInfo | null>();
 
 const getImportInfoForIdentifier = (
+  identifier: EsTreeNodeOfType<"Identifier">,
+): ZodImportInfo | null => {
+  if (importInfoCache.has(identifier)) return importInfoCache.get(identifier) ?? null;
+  const importInfo = computeImportInfoForIdentifier(identifier);
+  importInfoCache.set(identifier, importInfo);
+  return importInfo;
+};
+
+const computeImportInfoForIdentifier = (
   identifier: EsTreeNodeOfType<"Identifier">,
 ): ZodImportInfo | null => {
   const binding = findVariableInitializer(identifier, identifier.name);
@@ -38,7 +44,7 @@ const getImportInfoForIdentifier = (
   const declaration = specifier.parent;
   if (!declaration || !isNodeOfType(declaration, "ImportDeclaration")) return null;
   const source = declaration.source?.value;
-  if (source !== ZOD_MODULE) return null;
+  if (typeof source !== "string" || !ZOD_MODULE_SOURCES.includes(source)) return null;
 
   if (isNodeOfType(specifier, "ImportNamespaceSpecifier")) {
     return { imported: null, isDefault: false, isNamespace: true };

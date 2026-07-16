@@ -306,6 +306,13 @@ export const OXLINT_OUTPUT_MAX_BYTES = 50 * 1024 * 1024;
 // binding is markedly slower than on a developer laptop.
 export const OXLINT_SPAWN_TIMEOUT_MS = 60_000;
 
+// Longest synchronous burst a cooperative main-thread pass (the security
+// scan's walk / file / rule steps, lint's pre-spawn cache hashing) may hold
+// the event loop before handing it back. Lint child processes are spawned and
+// drained from main-thread continuations, so bursts beyond ~a frame idle the
+// whole worker pool — and starve concurrently-scanning sibling projects.
+export const COOPERATIVE_YIELD_BUDGET_MS = 12;
+
 // Directory name appended to os.tmpdir() to form the shared base for the V8
 // compile cache. Matches the base Node's own module.enableCompileCache() uses,
 // so the bin (parent) and the spawned oxlint batches (children) share one tree.
@@ -327,6 +334,27 @@ export const OXLINT_SPLIT_TOTAL_BUDGET_MS = 180_000;
 // one level of slack and still terminates the recursion deterministically
 // even if the budget clock is somehow not advancing.
 export const OXLINT_SPLIT_MAX_DEPTH = 8;
+
+// Exit codes that mean the oxlint child ABORTED rather than exited. Windows
+// has no POSIX signals, so an aborting child (oxlint's native binding
+// panicking under memory pressure, or Node's own `process.abort()`) reports
+// `signal: null` plus one of these exit codes instead of the SIGABRT a POSIX
+// parent would see: Node normalizes its aborts to 134 (`ExitCode::kAbort` —
+// which is also the POSIX 128+SIGABRT convention), and a Rust / `__fastfail`
+// abort exits with NTSTATUS STATUS_STACK_BUFFER_OVERRUN (0xC0000409).
+// `spawnOxlint` folds these into the same `OxlintBatchExceeded
+// { kind: "oom" }` class as a SIGABRT so the binary-split retry and the OOM
+// rescue pass work on Windows too.
+export const ABORT_EXIT_CODES: ReadonlySet<number> = new Set([134, 0xc0000409]);
+
+// Wall-clock cap on the serial OOM rescue pass (replaying OOM-dropped
+// files one at a time after the parallel pass). The rescue is unbounded
+// by batch count — each file that STILL fails re-waits a spawn timeout —
+// so without a cap a large OOM-dropped set could eat the whole
+// LINT_PHASE_TIMEOUT_MS and convert a partial scan into a total lint
+// failure. 60 s rescues dozens of healthy files while at most one
+// still-pathological file can burn the budget.
+export const OXLINT_OOM_RESCUE_BUDGET_MS = 60_000;
 
 // Effect-side cap on the dead-code phase. Sits ABOVE the in-worker
 // DEAD_CODE_WORKER_TIMEOUT_MS (= 120 s) as a runtime-independent
@@ -450,6 +478,15 @@ export const DIAGNOSTIC_CATEGORY_BUCKETS = [
   "Accessibility",
   "Maintainability",
 ] as const;
+
+// Categories whose findings are matched by occurrence in the CI baseline
+// delta — the finding's identity is the flagged element (a missing
+// attribute, a wrong element), not the flagged line's text — so the delta
+// matches them by `(file, rule)` occurrence count instead of a line-text
+// hash. Every Accessibility rule is element-level; rules in other
+// categories opt in individually via their per-rule `matchByOccurrence`
+// flag (see `resolveMatchByOccurrence` in `runners/oxlint/parse-output`).
+export const OCCURRENCE_MATCHED_CATEGORIES: ReadonlySet<string> = new Set(["Accessibility"]);
 
 // Rules whose heuristic only makes sense in application code. A published
 // library deliberately exposes flexible primitives (components built in
@@ -620,9 +657,41 @@ export const FILE_LINT_CACHE_MAX_RULESET_COUNT = 8;
 // repos; the most-recently-stored entries are kept when over the cap.
 export const FILE_LINT_CACHE_MAX_FILE_COUNT = 50_000;
 
+// Sidecar lint cache (`runners/oxlint/sidecar-lint-cache.ts`). Caches the
+// cross-file rules' per-file diagnostics keyed by content hash + sidecar
+// ruleset hash, each entry guarded by the file's cross-file dependency probe
+// set, so a warm rescan replays the sidecar instead of re-linting every
+// unchanged file. Shares the file cache's bucket/file caps.
+export const SIDECAR_LINT_CACHE_SCHEMA_VERSION = 2;
+
+export const SIDECAR_LINT_CACHE_FILENAME = "sidecar-lint-cache.json";
+
 // Length (chars) of the project-directory hash used to name the tmp-dir cache
 // fallback when a project has no `node_modules` to host `.cache/react-doctor`.
 export const CACHE_FILENAME_HASH_LENGTH_CHARS = 16;
+
+// This package's own version, inlined at build time (`vite.config.ts` `env`)
+// the same way the CLI inlines `VERSION`; running from source (tests, dev)
+// falls back to "0.0.0". Cache keys include it because cached diagnostics
+// carry core's POST-PROCESSING (message text, toolchain-dependency filtering),
+// so an upgrade must never replay entries shaped by an older core.
+export const CORE_PACKAGE_VERSION = process.env.REACT_DOCTOR_CORE_VERSION ?? "0.0.0";
+
+// Whole-project dead-code result cache (`dead-code/dead-code-result-cache.ts`).
+// Replays deslop's diagnostics — skipping the analysis worker entirely — when
+// nothing the analysis reads has changed since the stored run.
+// Bumped to 2: entries carry a per-file `files` map (mtime, size, content
+// hash) instead of folding the file stats into the key, so a fresh checkout's
+// bumped mtimes can be repaired against unchanged content.
+export const DEAD_CODE_CACHE_SCHEMA_VERSION = 2;
+
+export const DEAD_CODE_CACHE_FILENAME = "dead-code-cache.json";
+
+// deslop's incremental analysis store (`DeslopConfig.incrementalCachePath`) —
+// per-file parse summaries + collect/resolution/package-fact layers, written
+// by the analysis WORKER for the changed-files case the whole-result cache
+// above can't serve. Lives in the same per-project cache directory.
+export const DEAD_CODE_SUMMARY_CACHE_FILENAME = "dead-code-summaries.json";
 
 // Plugin / rule / category identity for the diagnostics the supply-chain
 // check emits. `plugin: "socket"` keeps Socket findings visually distinct
@@ -681,3 +750,5 @@ export const SUPPLY_CHAIN_ALERT_NOTE_MAX_CHARS = 160;
 // Next rule family — so a low Socket score would be redundant noise rather
 // than an actionable, distinct supply-chain signal.
 export const SUPPLY_CHAIN_IGNORED_PACKAGES: ReadonlySet<string> = new Set(["next"]);
+
+export const LINE_FEED_UTF8_BYTE = 10;

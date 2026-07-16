@@ -20,7 +20,7 @@ describe("runOxlint", () => {
   describeRules(
     "state & effects rules",
     {
-      "no-derived-state-effect": {
+      "no-adjust-state-on-prop-change": {
         fixture: "state-issues.tsx",
         ruleSource: "rules/state-and-effects.ts",
         severity: "warning",
@@ -48,11 +48,6 @@ describe("runOxlint", () => {
         ruleSource: "rules/state-and-effects.ts",
         severity: "error",
         category: "Bugs",
-      },
-      "no-cascading-set-state": {
-        fixture: "state-issues.tsx",
-        ruleSource: "rules/state-and-effects.ts",
-        severity: "warning",
       },
       "no-effect-chain": {
         fixture: "state-issues.tsx",

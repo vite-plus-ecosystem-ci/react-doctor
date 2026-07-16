@@ -520,14 +520,15 @@ describe("issue #141: oxlint config must not reference unloaded plugins", () => 
       project: buildTestProject({ rootDirectory: "/tmp/test" }),
     });
 
-    // `no-adjust-state-on-prop-change` is intentionally promoted to
-    // `error` — the pattern always causes an extra render with a stale
-    // UI between commits, there is no benign instance. See SOURCE.md.
+    // The whole derived-state family ships at `warn` — including
+    // `no-adjust-state-on-prop-change`, which was briefly promoted to
+    // `error` before the corpus audit demoted it back to match the
+    // family it co-fires with. See SOURCE.md.
     const portedRuleSeverity: Record<string, "warn" | "error"> = {
       "no-derived-state": "warn",
       "no-chain-state-updates": "warn",
       "no-event-handler": "warn",
-      "no-adjust-state-on-prop-change": "error",
+      "no-adjust-state-on-prop-change": "warn",
       "no-reset-all-state-on-prop-change": "warn",
       "no-pass-live-state-to-parent": "warn",
       "no-pass-data-to-parent": "warn",
@@ -571,7 +572,7 @@ describe("issue #141: oxlint config must not reference unloaded plugins", () => 
   // These perf rules guard against fresh allocations that React Compiler
   // auto-fixes at compile time. When RC is in scope they're unactionable
   // noise, so they ship with
-  // `disabledBy: ["react-compiler"]` and the gate must drop them.
+  // `disabledWhen: ["react-compiler"]` and the gate must drop them.
   it("disables react-compiler-redundant perf rules when React Compiler is detected", () => {
     const reactCompilerGatedRules = [
       "react-doctor/jsx-no-new-object-as-prop",
@@ -600,7 +601,7 @@ describe("issue #141: oxlint config must not reference unloaded plugins", () => 
 
   // The renderItem-family RN perf rules guard against inline functions/objects
   // in list rows, which React Compiler auto-memoizes. RC users were seeing them
-  // as noise (#723), so all three ship with `disabledBy: ["react-compiler"]`
+  // as noise (#723), so all three ship with `disabledWhen: ["react-compiler"]`
   // and must drop once the compiler is detected. They `requires: ["react-native"]`,
   // so the assertion needs an RN-capable test project.
   it("disables the renderItem-family RN perf rules when React Compiler is detected", () => {

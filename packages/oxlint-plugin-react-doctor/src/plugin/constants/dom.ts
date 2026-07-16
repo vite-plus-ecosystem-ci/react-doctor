@@ -1,10 +1,8 @@
-export const PASSIVE_EVENT_NAMES = new Set([
-  "scroll",
-  "wheel",
-  "touchstart",
-  "touchmove",
-  "touchend",
-]);
+// Only events that can actually block scrolling benefit from
+// `{ passive: true }`. "scroll" fires after the scroll happens and is not
+// cancelable, and "touchend" doesn't gate scroll starts — browsers ignore
+// the passive flag for both, so recommending it there is pure noise.
+export const PASSIVE_EVENT_NAMES = new Set(["wheel", "mousewheel", "touchstart", "touchmove"]);
 
 export const SCRIPT_LOADING_ATTRIBUTES = new Set(["defer", "async"]);
 
@@ -42,6 +40,16 @@ export const TIMER_CALLEE_NAMES_REQUIRING_CLEANUP = new Set(["setInterval", "set
 
 export const TIMER_CLEANUP_CALLEE_NAMES = new Set(["clearInterval", "clearTimeout"]);
 
+// Connection-opening constructors. Connecting starts at construction
+// time, so an instance created without a later `.close()` keeps the
+// connection (and its message handlers) alive after unmount.
+export const SOCKET_CONSTRUCTOR_NAMES_REQUIRING_CLEANUP = new Set([
+  "WebSocket",
+  "EventSource",
+  "BroadcastChannel",
+  "RTCPeerConnection",
+]);
+
 // Globals whose values mutate outside the React data flow. Listing
 // them as deps doesn't trigger a re-run when they change because
 // React compares deps with `Object.is` during render — and the read
@@ -62,6 +70,23 @@ export const EXTERNAL_SYNC_OBSERVER_CONSTRUCTORS = new Set([
   "MutationObserver",
   "ResizeObserver",
   "PerformanceObserver",
+]);
+
+export const EXTERNAL_SYNC_DOM_MEMBER_METHOD_NAMES = new Set([
+  "blur",
+  "focus",
+  "getBoundingClientRect",
+  "getClientRects",
+  "measure",
+  "measureInWindow",
+  "measureLayout",
+  "scroll",
+  "scrollBy",
+  "scrollIntoView",
+  "scrollTo",
+  "select",
+  "setRangeText",
+  "setSelectionRange",
 ]);
 
 export const STORAGE_OBJECTS = new Set(["localStorage", "sessionStorage"]);

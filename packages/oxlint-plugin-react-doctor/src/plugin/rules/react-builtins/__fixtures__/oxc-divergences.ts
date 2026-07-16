@@ -16,6 +16,35 @@ export interface OxcDivergence {
 }
 
 export const DIVERGENCES: Record<string, OxcDivergence> = {
+  "exhaustive-deps": {
+    failSkips: [81, 125, 126, 127],
+    reason:
+      "Intentional: exact props members suppress a synthetic whole-props dependency, unknown or deferred state values can converge through React's same-value bailout, and useMemo accepts extra reactive invalidation tokens.",
+  },
+  "no-unknown-property": {
+    // fp-review: 1110 unique false positives vs 28 true positives (1%
+    // precision) drove three narrowings, each encoded by a fixture:
+    // (1) fail[2] (`<div abc="…"/>`) — since React 16, unknown
+    //     all-lowercase attributes are rendered to the DOM verbatim
+    //     (Electron `<webview partition>`, `<iframe credentialless>`,
+    //     library hooks like `frimousse-list`), so "React ignores this
+    //     prop" is false. Only names with a known camel form, uppercase
+    //     chars, or malformed `aria-*`/`data-*` still report.
+    // (2) fail[19-20] (`<div onLoad/>`, `<div onAbort … onError/>`) —
+    //     React attaches synthetic events to any host element; the
+    //     per-tag whitelist only applies to non-event attributes.
+    // (3) fail[38] (`<t onChñnge/>`) — lowercase intrinsics that aren't
+    //     real HTML/SVG tags (react-three-fiber `<mesh>`, `<webview>`)
+    //     are custom-reconciler elements, not DOM elements, and are
+    //     skipped entirely.
+    // (4) fail[14] (`<rect clip-path="bar"/>`) — docs-validation
+    //     2026-07: hyphenated SVG presentation attributes on SVG
+    //     elements are the real attribute names and render verbatim;
+    //     renaming to camelCase is purely stylistic.
+    failSkips: [2, 14, 19, 20, 38],
+    reason:
+      "Intentional: skip verbatim-rendered lowercase attrs, hyphenated SVG attrs on SVG hosts, tag-restricted event handlers, and non-HTML/SVG lowercase intrinsics (R3F-style FPs).",
+  },
   "no-find-dom-node": {
     // OXC flags a bare `findDOMNode(...)` purely by name. A locally
     // defined `function findDOMNode(...)` (or any same-name helper) is
@@ -27,6 +56,18 @@ export const DIVERGENCES: Record<string, OxcDivergence> = {
     // `no-find-dom-node.regressions.test.ts`.
     failSkips: [3, 4],
     reason: "Intentional: bare findDOMNode must be imported from react-dom (locals are FPs).",
+  },
+  "forbid-component-props": {
+    // OXC applies a default forbid list `["className", "style"]` when the
+    // rule is enabled without options, flagging the canonical Tailwind /
+    // shadcn customization pattern on every component usage (prod
+    // telemetry: avg 639 firings per affected run). React Doctor keeps
+    // the rule inert until the project names the props to block, so
+    // fail[0] (`<Foo className/>`) and fail[1] (`<Foo style/>`), which
+    // pass no options, no longer report. Every configured fixture still
+    // fires — see `forbid-component-props.regressions.test.ts`.
+    failSkips: [0, 1],
+    reason: "Intentional: no implicit className/style default — explicit `forbid` config required.",
   },
   "no-this-in-sfc": {
     // OXC decides "is an SFC" from the PascalCase name alone, so a plain
@@ -55,13 +96,33 @@ export const DIVERGENCES: Record<string, OxcDivergence> = {
     reason: "Intentional: default max raised from 2 → 10 to suppress idiomatic-React FPs.",
   },
   "only-export-components": {
-    // OXC defaults `allowConstantExport: false`, which flags any
-    // primitive-constant export alongside a component. We default
-    // `allowConstantExport: true` because exported constants are
-    // stable references that don't break Fast Refresh — matches the
-    // recommended config in `eslint-plugin-react-refresh`.
-    failSkips: [3, 4, 10, 14],
-    reason: "Intentional: default allowConstantExport=true to suppress shadcn-style FPs.",
+    // Three intentional divergences:
+    // (1) fail[3, 4, 10, 14] — OXC defaults `allowConstantExport: false`,
+    //     which flags any primitive-constant export alongside a
+    //     component. We default `allowConstantExport: true` because
+    //     exported constants are stable references that don't break Fast
+    //     Refresh — matches the recommended config in
+    //     `eslint-plugin-react-refresh`.
+    // (2) fail[6] — a pure `export *` barrel is not instrumented as a
+    //     Fast Refresh boundary by Vite's official React plugin. It only
+    //     reports when the same module also declares a local component.
+    // (3) fail[12, 13, 21] — non-exported internal components are no
+    //     longer reported. The react-refresh boundary constraint is
+    //     about exports only (a module that exports a component must
+    //     export only components); a module whose exports carry no
+    //     component was never a refresh boundary, and "export this
+    //     component" is the wrong advice for config/registry files that
+    //     merely USE a local component (`export const tabs = [<Tab/>]`).
+    //     The real breaker — a namespace-object export bundling
+    //     components — is reported instead (not covered by OXC fixtures;
+    //     see only-export-components.regressions.test.ts).
+    // (4) Function exports require JSX/createElement return evidence.
+    //     OXC treats every PascalCase function as a component, which
+    //     misclassifies acronym-named formatters in utility modules.
+    passSkips: [14, 15, 16, 17, 18, 42, 51, 52, 53, 54, 56, 57, 61, 62],
+    failSkips: [0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 18, 19, 21, 22, 23],
+    reason:
+      "Intentional: require render-output proof for inspectable functions; recognize Babel Fast Refresh wrapper transforms; default allowConstantExport=true; pure export-star barrels are not refresh boundaries; exports-only Fast-Refresh model (local components unreported, namespace-object exports flagged).",
   },
   "jsx-pascal-case": {
     // OXC defaults `allowLeadingUnderscore: false`. We default to
@@ -119,15 +180,22 @@ export const DIVERGENCES: Record<string, OxcDivergence> = {
     reason: "Intentional: skip intrinsic HTML elements + non-memoised consumers (memo-gated rule).",
   },
   "jsx-no-jsx-as-prop": {
-    // OXC flags any JSX passed as a prop. We skip well-known "slot"
-    // prop names (`icon`, `tooltip`, `header`, `fallback`, `render*`,
-    // etc.) because these props are designed to receive single JSX
-    // elements — every design system (shadcn, Radix, MUI, Mantine,
-    // Chakra) has them, and the inline-JSX form is the canonical
-    // usage. fail[4] (`<IconButton icon={Icon}/>`) exercises the
-    // `icon` slot.
-    failSkips: [4],
-    reason: "Intentional: skip known slot-prop names (icon, tooltip, fallback, render*, etc.).",
+    // Two skips merged:
+    // (1) known slot-prop names (fail[4], `<IconButton icon={Icon}/>`) —
+    //     `icon`, `tooltip`, `header`, `fallback`, `render*`, etc. are
+    //     designed to receive single JSX elements; every design system
+    //     (shadcn, Radix, MUI, Mantine, Chakra) has them and the
+    //     inline-JSX form is the canonical usage.
+    // (2) non-memoised consumers (fail[0-3]) — like the other
+    //     react_perf ports, we only fire when same-file analysis PROVES
+    //     the consumer is `memo`-wrapped. OXC's fixtures pass
+    //     plain/unknown consumers (`<Item jsx={<SubItem/>}/>`), so the
+    //     memo gate suppresses them. Prod telemetry review 2026-07:
+    //     40/40 corpus hits were slots on memo-unknown imported
+    //     components. The gated path is covered by
+    //     `jsx-no-jsx-as-prop.regressions.test.ts`.
+    failSkips: [0, 1, 2, 3, 4],
+    reason: "Intentional: skip slot-prop names + non-memoised consumers (memo-gated rule).",
   },
   "jsx-no-new-object-as-prop": {
     // Three skips merged:
@@ -174,18 +242,20 @@ export const DIVERGENCES: Record<string, OxcDivergence> = {
       "Intentional: flag only 3+ components (OXC flags 2+); idiomatic 2-component co-location is allowed.",
   },
   "no-array-index-key": {
-    // OXC flags any key expression that incorporates the array index,
-    // including arithmetic. React Doctor's composite-key heuristic
-    // deliberately skips `<expr> + index` shapes because an offset is
-    // often a stable global scheme (`key={page * pageSize + index}`,
-    // which produces a unique-across-pages key). fail[2] (`key={1 +
-    // index}`) is the degenerate constant-offset case that the same
-    // heuristic also skips — a minor accepted false-negative on a
-    // default-OFF rule. The direct `key={index}` cases (fail[0-1,
-    // 3-20]) still fire.
-    failSkips: [2],
+    // OXC's rule covers both the JSX `key={index}` attribute and the
+    // `React.cloneElement(child, { key: index })` shape. React Doctor's
+    // canonical index-key rule is `no-array-index-as-key` (Bugs
+    // category, default-on, richer exemptions), which owns the JSX
+    // attribute path — keeping a second JSX path in this opt-in port
+    // double-reported every hit when both rules were enabled (prod
+    // telemetry 2026-07). This port is therefore scoped to the
+    // cloneElement coverage the canonical rule doesn't have, so every
+    // JSX-attribute fail fixture (fail[0-3, 8-18]) is delegated. The
+    // cloneElement fixtures (fail[4-7, 19-20]) still fire — see
+    // `no-array-index-key.regressions.test.ts`.
+    failSkips: [0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
     reason:
-      "Intentional: composite-key heuristic skips `<expr> + index`, incl. the constant `1 + index`.",
+      "Intentional: JSX `key={index}` is owned by no-array-index-as-key; this port only covers React.cloneElement.",
   },
   "style-prop-object": {
     // OXC flags `style="..."` on any JSX element. We only flag it on

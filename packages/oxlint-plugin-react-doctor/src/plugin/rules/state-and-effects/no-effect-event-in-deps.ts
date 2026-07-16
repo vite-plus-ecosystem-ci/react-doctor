@@ -5,6 +5,7 @@ import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { isComponentAssignment } from "../../utils/is-component-assignment.js";
 import { isHookCall } from "../../utils/is-hook-call.js";
+import { isNonReactEffectEventCallee } from "../../utils/is-non-react-effect-event-callee.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { isUppercaseName } from "../../utils/is-uppercase-name.js";
 import type { RuleContext } from "../../utils/rule-context.js";
@@ -103,6 +104,14 @@ export const noEffectEventInDeps = defineRule({
         const initializer = declaratorNode.init;
         if (!initializer || !isNodeOfType(initializer, "CallExpression")) return;
         if (!isHookCall(initializer, "useEffectEvent")) return;
+        // A same-named `useEffectEvent` imported from a non-React package OR
+        // defined in this module (userland polyfill) returns a STABLE
+        // callback — listing it in deps is fine, so it must not taint the
+        // binding set. Only React's export / a bare global carries the
+        // unstable-identity semantics.
+        if (isNonReactEffectEventCallee(initializer.callee, declaratorNode, context.scopes)) {
+          return;
+        }
         componentBindings.addBindingToCurrentFrame(declaratorNode.id.name);
       },
     });

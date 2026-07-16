@@ -107,12 +107,34 @@ export interface CollectRuleHitsOptions {
   /**
    * Project framework hint (default: "unknown"). Set to "react-native"
    * or "expo" to activate the `rn-*` rule bucket (both add the
-   * `react-native` capability in `buildCapabilities`).
+   * `react-native` capability in `buildCapabilities`), or a
+   * server-capable framework ("remix", "nextjs", "tanstack-start") for
+   * rules gated on a server-mutation story (e.g. `no-prevent-default`'s
+   * form variant).
    */
-  framework?: "unknown" | "react-native" | "expo";
+  framework?: ProjectInfo["framework"];
   hasReactCompiler?: boolean;
+  hasReactCompilerLintPlugin?: boolean;
   hasTanStackQuery?: boolean;
+  hasSsrDependency?: boolean;
 }
+
+const DERIVED_STATE_SIBLING_RULE_IDS = [
+  "no-adjust-state-on-prop-change",
+  "no-derived-state",
+  "no-derived-state-effect",
+  "no-initialize-state",
+];
+
+export const buildIsolatedDerivedStateRuleConfig = (
+  ruleId: string,
+): Record<string, "off" | "warn"> =>
+  Object.fromEntries(
+    DERIVED_STATE_SIBLING_RULE_IDS.map((siblingRuleId) => [
+      `react-doctor/${siblingRuleId}`,
+      siblingRuleId === ruleId ? "warn" : "off",
+    ]),
+  );
 
 export interface BuildTestProjectOptions {
   rootDirectory: string;
@@ -127,6 +149,7 @@ export interface BuildTestProjectOptions {
   nextjsMajorVersion?: number | null;
   shopifyFlashListVersion?: string | null;
   shopifyFlashListMajorVersion?: number | null;
+  isStaticExport?: boolean;
 }
 
 export const buildTestProject = (options: BuildTestProjectOptions): ProjectInfo => {
@@ -160,7 +183,9 @@ export const buildTestProject = (options: BuildTestProjectOptions): ProjectInfo 
     framework,
     hasTypeScript: options.hasTypeScript ?? true,
     hasReactCompiler: options.hasReactCompiler ?? false,
+    hasReactCompilerLintPlugin: options.hasReactCompilerLintPlugin ?? false,
     hasTanStackQuery: options.hasTanStackQuery ?? false,
+    hasSsrDependency: options.hasSsrDependency ?? false,
     nextjsVersion,
     nextjsMajorVersion,
     hasReactNativeWorkspace: framework === "expo" || framework === "react-native",
@@ -169,6 +194,7 @@ export const buildTestProject = (options: BuildTestProjectOptions): ProjectInfo 
     shopifyFlashListMajorVersion: options.shopifyFlashListMajorVersion ?? null,
     hasReanimated: options.hasReanimated ?? false,
     isPreES2023Target: false,
+    isStaticExport: options.isStaticExport ?? false,
     preactVersion: null,
     preactMajorVersion: null,
     sourceFileCount: 0,
@@ -192,13 +218,16 @@ export const collectRuleHits = async (
   options: CollectRuleHitsOptions = {},
 ): Promise<RuleHit[]> => {
   const project = buildTestProject({ rootDirectory: projectDir, ...options });
+  const isolatedSiblingRules = DERIVED_STATE_SIBLING_RULE_IDS.includes(ruleId)
+    ? buildIsolatedDerivedStateRuleConfig(ruleId)
+    : { [`react-doctor/${ruleId}`]: "warn" };
   const diagnostics = await runOxlint({
     rootDirectory: projectDir,
     project,
     // Force-enable the rule under test so default-disabled rules
     // (`defaultEnabled: false`) still produce hits here. Severity is
     // irrelevant — callers assert on file path and message, not severity.
-    userConfig: { rules: { [`react-doctor/${ruleId}`]: "warn" } },
+    userConfig: { rules: isolatedSiblingRules },
   });
   return diagnostics
     .filter((diagnostic) => diagnostic.rule === ruleId)

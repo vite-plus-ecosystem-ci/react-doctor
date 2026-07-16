@@ -8,7 +8,7 @@ import type { OxlintRuleSeverity } from "oxlint-plugin-react-doctor";
 import type { ProjectInfo, RuleSeverityControls } from "../../types/index.js";
 import { resolveRuleSeverityOverride } from "../../resolve-rule-severity-override.js";
 import { COMPILER_CLEANUP_BUCKET, COMPILER_CLEANUP_RULE_KEYS } from "../../constants.js";
-import { buildCapabilities, shouldEnableRule } from "./capabilities.js";
+import { getCapabilities, shouldEnableRule } from "../../project-info/capabilities.js";
 import { filterRulesToAvailable, resolveReactHooksJsPlugin } from "./plugin-resolution.js";
 import type { JsPluginEntry, ResolvedUserPlugin } from "./plugin-resolution.js";
 
@@ -46,9 +46,16 @@ export interface OxlintConfigOptions {
    *     linted file's own content, so their output is content-addressable.
    *   - `"sidecar"` — ONLY the cross-file react-doctor rules; the React
    *     Compiler frontend and user plugins are dropped (none are cross-file).
-   *     This config always runs fresh on every file and is never cached.
    */
   ruleSelection?: "cacheable" | "sidecar";
+  /**
+   * Narrows a `"sidecar"` selection to a subset of the cross-file rules.
+   * The sidecar cache path uses it to split fingerprint-BOUNDED rules
+   * (replayable via the dependency-probe store) from UNBOUNDED ones (no
+   * dependency collector — they re-lint every file, every scan). Ignored
+   * for other selections.
+   */
+  sidecarRuleIdFilter?: ReadonlySet<string>;
 }
 
 const resolveSettingsRootDirectory = (rootDirectory: string): string => {
@@ -117,13 +124,17 @@ export const createOxlintConfig = ({
   userPlugins = [],
   disableReactHooksJsPlugin = false,
   ruleSelection,
+  sidecarRuleIdFilter,
 }: OxlintConfigOptions) => {
   // The sidecar carries only cross-file react-doctor rules — the React
   // Compiler frontend isn't cross-file, so it never belongs there.
   const reactHooksJsPlugin =
     disableReactHooksJsPlugin || ruleSelection === "sidecar"
       ? null
-      : resolveReactHooksJsPlugin(project.hasReactCompiler, customRulesOnly);
+      : resolveReactHooksJsPlugin(
+          project.hasReactCompiler || project.hasReactCompilerLintPlugin === true,
+          customRulesOnly,
+        );
   const reactCompilerRules = reactHooksJsPlugin
     ? applyRuleSeverityControls(
         filterRulesToAvailable(
@@ -138,7 +149,7 @@ export const createOxlintConfig = ({
   const jsPlugins: JsPluginEntry[] = [];
   if (reactHooksJsPlugin) jsPlugins.push(reactHooksJsPlugin.entry);
 
-  const capabilities = buildCapabilities(project);
+  const capabilities = getCapabilities(project);
 
   const enabledReactDoctorRules: Record<string, OxlintRuleSeverity> = {};
   for (const registryEntry of REACT_DOCTOR_RULES) {
@@ -149,6 +160,13 @@ export const createOxlintConfig = ({
     // only them. The default (undefined) keeps every rule.
     if (ruleSelection === "cacheable" && CROSS_FILE_RULE_IDS.has(registryEntry.id)) continue;
     if (ruleSelection === "sidecar" && !CROSS_FILE_RULE_IDS.has(registryEntry.id)) continue;
+    if (
+      ruleSelection === "sidecar" &&
+      sidecarRuleIdFilter !== undefined &&
+      !sidecarRuleIdFilter.has(registryEntry.id)
+    ) {
+      continue;
+    }
     // Scan rules run via core's check-security-scan environment
     // check, not oxlint — registering them would only add dead visitors.
     if (rule.scan !== undefined) continue;
@@ -157,7 +175,7 @@ export const createOxlintConfig = ({
     // from upstream OXC plugins.
     if (customRulesOnly && registryEntry.originallyExternal) continue;
     if (rule.framework !== "global" && !rule.requires) continue;
-    if (!shouldEnableRule(rule.requires, rule.tags, capabilities, ignoredTags, rule.disabledBy))
+    if (!shouldEnableRule(rule.requires, rule.tags, capabilities, ignoredTags, rule.disabledWhen))
       continue;
     // `defaultEnabled: false` opts a rule out of the default config —
     // it ships in the plugin but only activates when the user pins the
@@ -222,6 +240,10 @@ export const createOxlintConfig = ({
       "react-doctor": {
         framework: project.framework,
         rootDirectory: resolveSettingsRootDirectory(project.rootDirectory),
+        // The framework-capability vocabulary, available to any rule via
+        // `hasCapability`. Sorted so equivalent projects hash identically
+        // (this bag feeds the ruleset cache key).
+        capabilities: [...capabilities].sort(),
         ...(project.shopifyFlashListMajorVersion !== null
           ? { shopifyFlashListMajorVersion: project.shopifyFlashListMajorVersion }
           : {}),

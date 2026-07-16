@@ -1,9 +1,13 @@
 import { defineRule } from "../../utils/define-rule.js";
+import { LARGE_TEXT_OPTIMIZATION_THRESHOLD_CHARS } from "../../constants/thresholds.js";
 import { isComponentParameterSymbol } from "../../utils/is-component-parameter-symbol.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 import type { ScopeAnalysis, SymbolDescriptor } from "../../semantic/scope-analysis.js";
+import { findTransparentExpressionRoot } from "../../utils/find-transparent-expression-root.js";
+import { getDirectConstInitializer } from "../../utils/get-direct-const-initializer.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 
 // `const { children } = props` / `const { children } = this.props`: a body
@@ -61,6 +65,154 @@ const resolvesToPropsChildren = (operand: EsTreeNode, scopes: ScopeAnalysis): bo
   return false;
 };
 
+const isJsxProducingCallee = (callee: EsTreeNode): boolean => {
+  const calleeName = isNodeOfType(callee, "Identifier")
+    ? callee.name
+    : isNodeOfType(callee, "MemberExpression") &&
+        !callee.computed &&
+        isNodeOfType(callee.property, "Identifier")
+      ? callee.property.name
+      : null;
+  return calleeName === "createElement" || calleeName === "cloneElement";
+};
+
+const containsRenderOutput = (root: EsTreeNode | null | undefined): boolean => {
+  if (!root) return false;
+  let didFindRenderOutput = false;
+  const visit = (node: EsTreeNode): void => {
+    if (didFindRenderOutput) return;
+    if (isNodeOfType(node, "JSXElement") || isNodeOfType(node, "JSXFragment")) {
+      didFindRenderOutput = true;
+      return;
+    }
+    if (isNodeOfType(node, "ReturnStatement")) {
+      didFindRenderOutput = true;
+      return;
+    }
+    if (isNodeOfType(node, "CallExpression") && isJsxProducingCallee(node.callee)) {
+      didFindRenderOutput = true;
+      return;
+    }
+    const record = node as unknown as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      if (key === "parent") continue;
+      const child = record[key];
+      if (Array.isArray(child)) {
+        for (const item of child) {
+          if (item && typeof item === "object" && "type" in item) visit(item as EsTreeNode);
+        }
+      } else if (child && typeof child === "object" && "type" in child) {
+        visit(child as EsTreeNode);
+      }
+    }
+  };
+  visit(root);
+  return didFindRenderOutput;
+};
+
+const containsJsxValue = (root: EsTreeNode | null | undefined): boolean => {
+  if (!root) return false;
+  const inner = stripParenExpression(root);
+  if (isNodeOfType(inner, "JSXElement") || isNodeOfType(inner, "JSXFragment")) return true;
+  if (isNodeOfType(inner, "ConditionalExpression")) {
+    return containsJsxValue(inner.consequent) || containsJsxValue(inner.alternate);
+  }
+  if (isNodeOfType(inner, "LogicalExpression")) {
+    return containsJsxValue(inner.left) || containsJsxValue(inner.right);
+  }
+  if (isNodeOfType(inner, "CallExpression")) return isJsxProducingCallee(inner.callee);
+  return false;
+};
+
+// The doc's bar: flag only when the branch "actually changes rendering
+// rather than performing pure normalization or validation". Docs-validation
+// 2026-07 found the dominant FP shape is the comparison result feeding a
+// derived VALUE — a label fallback (`label={typeof children === 'string' ?
+// children : field}`), a markdown source (`file.value = … ? children : ''`),
+// a clsx toggle — where children render identically either way. So the
+// comparison must sit in branching position (ternary test, if test, or
+// `&&` guard) with JSX in a branch before it counts as polymorphic
+// rendering.
+const guardsRenderShape = (comparison: EsTreeNode): boolean => {
+  let current: EsTreeNode = findTransparentExpressionRoot(comparison);
+  while (current.parent) {
+    const parent: EsTreeNode = current.parent;
+    if (isNodeOfType(parent, "UnaryExpression") && parent.operator === "!") {
+      current = findTransparentExpressionRoot(parent);
+      continue;
+    }
+    if (isNodeOfType(parent, "LogicalExpression")) {
+      if (parent.left === current && containsJsxValue(parent.right)) return true;
+      current = findTransparentExpressionRoot(parent);
+      continue;
+    }
+    if (isNodeOfType(parent, "ConditionalExpression") && parent.test === current) {
+      return containsJsxValue(parent.consequent) || containsJsxValue(parent.alternate);
+    }
+    if (isNodeOfType(parent, "IfStatement") && parent.test === current) {
+      return containsRenderOutput(parent.consequent) || containsRenderOutput(parent.alternate);
+    }
+    return false;
+  }
+  return false;
+};
+
+const isPropsChildrenLength = (node: EsTreeNode, scopes: ScopeAnalysis): boolean => {
+  const unwrappedNode = stripParenExpression(node);
+  return (
+    isNodeOfType(unwrappedNode, "MemberExpression") &&
+    !unwrappedNode.computed &&
+    isNodeOfType(unwrappedNode.property, "Identifier") &&
+    unwrappedNode.property.name === "length" &&
+    resolvesToPropsChildren(stripParenExpression(unwrappedNode.object), scopes)
+  );
+};
+
+const resolveStaticNumericValue = (
+  node: EsTreeNode,
+  scopes: ScopeAnalysis,
+  visitedSymbolIds: ReadonlySet<number> = new Set(),
+): number | null => {
+  const unwrappedNode = stripParenExpression(node);
+  if (isNodeOfType(unwrappedNode, "Literal") && typeof unwrappedNode.value === "number") {
+    return Number.isFinite(unwrappedNode.value) ? unwrappedNode.value : null;
+  }
+  if (!isNodeOfType(unwrappedNode, "Identifier")) return null;
+  const symbol = scopes.symbolFor(unwrappedNode);
+  if (!symbol || visitedSymbolIds.has(symbol.id)) return null;
+  const initializer = getDirectConstInitializer(symbol);
+  if (!initializer) return null;
+  return resolveStaticNumericValue(initializer, scopes, new Set(visitedSymbolIds).add(symbol.id));
+};
+
+const isLargeTextLengthComparison = (node: EsTreeNode, scopes: ScopeAnalysis): boolean => {
+  const unwrappedNode = stripParenExpression(node);
+  if (!isNodeOfType(unwrappedNode, "BinaryExpression")) return false;
+  const leftIsLength = isPropsChildrenLength(unwrappedNode.left, scopes);
+  const rightIsLength = isPropsChildrenLength(unwrappedNode.right, scopes);
+  const thresholdNode = leftIsLength ? unwrappedNode.right : unwrappedNode.left;
+  if (!leftIsLength && !rightIsLength) return false;
+  const thresholdValue = resolveStaticNumericValue(thresholdNode, scopes);
+  if (thresholdValue === null || thresholdValue < LARGE_TEXT_OPTIMIZATION_THRESHOLD_CHARS) {
+    return false;
+  }
+  return leftIsLength
+    ? unwrappedNode.operator === ">" || unwrappedNode.operator === ">="
+    : unwrappedNode.operator === "<" || unwrappedNode.operator === "<=";
+};
+
+const isLargeStringOptimizationGuard = (comparison: EsTreeNode, scopes: ScopeAnalysis): boolean => {
+  let current = findTransparentExpressionRoot(comparison);
+  while (current.parent) {
+    const parent = current.parent;
+    if (!isNodeOfType(parent, "LogicalExpression") || parent.operator !== "&&") return false;
+    const otherOperand = parent.left === current ? parent.right : parent.left;
+    if (isLargeTextLengthComparison(otherOperand, scopes)) return true;
+    current = findTransparentExpressionRoot(parent);
+  }
+  return false;
+};
+
 // HACK: `typeof children === "string"` (or `=== 'object'`) is a
 // polymorphic-children smell — the component switches behavior based on
 // what the consumer happened to pass. Better to expose explicit
@@ -88,6 +240,9 @@ export const noPolymorphicChildren = defineRule({
         isNodeOfType(operand, "Literal") && operand.value === "string";
 
       if (!isStringLiteral(node.left) && !isStringLiteral(node.right)) return;
+
+      if (!guardsRenderShape(node)) return;
+      if (isLargeStringOptimizationGuard(node, context.scopes)) return;
 
       context.report({
         node,

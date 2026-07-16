@@ -1,4 +1,4 @@
-import { describe, expect, it } from "@voidzero-dev/vite-plus-test";
+import { describe, expect, it } from "vite-plus/test";
 import { analyzeScopes } from "./scope-analysis.js";
 import { attachParentReferences } from "../../test-utils/attach-parent-references.js";
 import { parseFixture } from "../../test-utils/parse-fixture.js";
@@ -322,6 +322,33 @@ describe("scope-analysis", () => {
         return parent?.type === "Property" && (parent as { shorthand: boolean }).shorthand;
       })!;
       expect(analysis.symbolFor(inObject)?.kind).toBe("const");
+    });
+  });
+
+  describe("decorators", () => {
+    it("supports host class nodes without a decorators property", () => {
+      const parsed = parseFixture("class Example { method() {} }");
+      const classDeclaration = findFirstNamedNode(parsed.program, "ClassDeclaration")!;
+      Reflect.deleteProperty(classDeclaration, "decorators");
+      attachParentReferences(parsed.program);
+
+      expect(() => analyzeScopes(parsed.program)).not.toThrow();
+    });
+
+    it("resolves parameter decorators outside the parameter scope", () => {
+      const analysis = analyze(`
+        import { useEffect } from "react";
+        class Example {
+          method(@useEffect() useEffect: unknown) {}
+        }
+      `);
+      const decoratorReference = findAllNamedNodes(
+        analysis.program,
+        "Identifier",
+        "useEffect",
+      ).find((identifier) => identifier.parent?.type === "CallExpression")!;
+
+      expect(analysis.symbolFor(decoratorReference)?.kind).toBe("import");
     });
   });
 

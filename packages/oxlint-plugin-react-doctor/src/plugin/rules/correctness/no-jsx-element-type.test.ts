@@ -3,6 +3,10 @@ import { runRule } from "../../../test-utils/run-rule.js";
 import { noJsxElementType } from "./no-jsx-element-type.js";
 
 describe("no-jsx-element-type", () => {
+  it("ships at warn severity — a type-hygiene preference, not a runtime bug", () => {
+    expect(noJsxElementType.severity).toBe("warn");
+  });
+
   it("flags function declaration with JSX.Element return type", () => {
     const result = runRule(
       noJsxElementType,
@@ -206,6 +210,58 @@ describe("no-jsx-element-type", () => {
     );
 
     expect(result.diagnostics).toEqual([]);
+  });
+
+  it("does not flag JSX.Element when JSX is imported from solid-js", () => {
+    const result = runRule(
+      noJsxElementType,
+      `
+      import type { JSX } from "solid-js";
+      const App = (): JSX.Element => <div />;
+    `,
+    );
+
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("does not flag JSX.Element when JSX is imported from preact", () => {
+    const result = runRule(
+      noJsxElementType,
+      `
+      import { JSX } from "preact";
+      function App(): JSX.Element {
+        return <div />;
+      }
+    `,
+    );
+
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("does not flag JSX.Element when JSX is imported from react (React 19 style)", () => {
+    const result = runRule(
+      noJsxElementType,
+      `
+      import type { JSX } from "react";
+      function App(): JSX.Element {
+        return <div />;
+      }
+    `,
+    );
+
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("still flags JSX.Element when the import binds something other than JSX", () => {
+    const result = runRule(
+      noJsxElementType,
+      `
+      import type { FC } from "react";
+      const App = (): JSX.Element => <div />;
+    `,
+    );
+
+    expect(result.diagnostics).toHaveLength(1);
   });
 
   it("still flags JSX.Element even with a shadowed local JSX namespace", () => {

@@ -1,3 +1,4 @@
+import { collectJsxRuntimeImports } from "../../utils/collect-jsx-runtime-imports.js";
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
@@ -5,6 +6,8 @@ import { findVariableInitializer } from "../../utils/find-variable-initializer.j
 import { isCreateElementCall } from "../../utils/is-create-element-call.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
+import { resolveJsxElementType } from "../../utils/resolve-jsx-element-type.js";
+import { walkAst } from "../../utils/walk-ast.js";
 
 const MESSAGE =
   "Your styles don't render because you passed the `style` prop a string instead of an object.";
@@ -125,10 +128,14 @@ const isInvalidStyleExpression = (expression: EsTreeNode): boolean => {
   return false;
 };
 
-const getJsxOpeningElementName = (node: EsTreeNodeOfType<"JSXOpeningElement">): string | null => {
-  if (isNodeOfType(node.name, "JSXIdentifier")) return node.name.name;
-  return null;
-};
+const hasObjectValuedClassList = (openingElement: EsTreeNodeOfType<"JSXOpeningElement">): boolean =>
+  openingElement.attributes.some((attribute) => {
+    if (!isNodeOfType(attribute, "JSXAttribute")) return false;
+    if (!isNodeOfType(attribute.name, "JSXIdentifier")) return false;
+    if (attribute.name.name !== "classList") return false;
+    if (!isNodeOfType(attribute.value, "JSXExpressionContainer")) return false;
+    return isNodeOfType(attribute.value.expression, "ObjectExpression");
+  });
 
 // Port of `oxc_linter::rules::react::style_prop_object`. Reports `style`
 // prop values that are clearly not objects: `style="..."` (string),
@@ -145,10 +152,31 @@ export const stylePropObject = defineRule({
   create: (context) => {
     const { allow } = resolveSettings(context.settings);
     const allowSet = new Set(allow);
+    let fileIsProvenSolidJsx = false;
 
     return {
+      Program: (node: EsTreeNodeOfType<"Program">) => {
+        const runtimeImports = collectJsxRuntimeImports(node);
+        let hasSolidSyntaxMarker = false;
+        if (!runtimeImports.hasReactRuntime && !runtimeImports.hasSolidRuntime) {
+          walkAst(node, (descendantNode) => {
+            if (
+              isNodeOfType(descendantNode, "JSXOpeningElement") &&
+              hasObjectValuedClassList(descendantNode)
+            ) {
+              hasSolidSyntaxMarker = true;
+              return false;
+            }
+          });
+        }
+        fileIsProvenSolidJsx =
+          !runtimeImports.hasReactRuntime &&
+          (runtimeImports.hasSolidRuntime || hasSolidSyntaxMarker);
+      },
       JSXOpeningElement(node: EsTreeNodeOfType<"JSXOpeningElement">) {
-        const elementName = getJsxOpeningElementName(node);
+        if (fileIsProvenSolidJsx) return;
+        if (!isNodeOfType(node.name, "JSXIdentifier")) return;
+        const elementName = resolveJsxElementType(node);
         if (elementName && allowSet.has(elementName)) return;
         // Custom components define their own `style` prop type — many
         // libraries (Expo's `<StatusBar style="auto"/>`, React Native
@@ -184,6 +212,7 @@ export const stylePropObject = defineRule({
         }
       },
       CallExpression(node: EsTreeNodeOfType<"CallExpression">) {
+        if (fileIsProvenSolidJsx) return;
         if (!isCreateElementCall(node)) return;
         const firstArgument = node.arguments[0];
         if (!firstArgument) return;

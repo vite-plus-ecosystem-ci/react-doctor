@@ -3,7 +3,9 @@ import { getImportSourceForName } from "../../utils/find-import-source-for-name.
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import { isNoOpStatement } from "../../utils/is-no-op-statement.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
+import { unwrapDiscardedExpression } from "../../utils/unwrap-discarded-expression.js";
 
 const REANIMATED_MODULE_SOURCE = "react-native-reanimated";
 
@@ -48,14 +50,16 @@ export const rnAnimationReactionAsDerived = defineRule({
       // behavior.
       let singleAssignment: EsTreeNode | null = null;
       if (isNodeOfType(body, "BlockStatement")) {
-        const statements = body.body ?? [];
+        const statements = (body.body ?? []).filter(
+          (statement: EsTreeNode) => !isNoOpStatement(statement),
+        );
         if (statements.length !== 1) return;
         const onlyStatement = statements[0];
         if (!isNodeOfType(onlyStatement, "ExpressionStatement")) return;
-        singleAssignment = onlyStatement.expression;
+        singleAssignment = unwrapDiscardedExpression(onlyStatement);
       } else if (body) {
         // Concise arrow body like `(cur) => sv.value = cur`.
-        singleAssignment = body;
+        singleAssignment = unwrapDiscardedExpression(body);
       }
       if (!singleAssignment) return;
 

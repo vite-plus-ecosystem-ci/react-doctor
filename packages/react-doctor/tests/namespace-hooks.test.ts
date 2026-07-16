@@ -2,7 +2,7 @@ import * as path from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import type { Diagnostic } from "@react-doctor/core";
 import { runOxlint } from "@react-doctor/core";
-import { buildTestProject } from "./regressions/_helpers.js";
+import { buildIsolatedDerivedStateRuleConfig, buildTestProject } from "./regressions/_helpers.js";
 
 const FIXTURES_DIRECTORY = path.resolve(
   import.meta.dirname,
@@ -24,6 +24,7 @@ const findDiagnosticsInFile = (
   );
 
 let diagnostics: Diagnostic[];
+let isolatedDerivedStateEffectDiagnostics: Diagnostic[];
 
 describe("namespace hook detection (React.useEffect, React.useState, etc.)", () => {
   it("loads diagnostics from namespace-hooks fixture", async () => {
@@ -34,11 +35,25 @@ describe("namespace hook detection (React.useEffect, React.useState, etc.)", () 
         hasTanStackQuery: true,
       }),
     });
+    isolatedDerivedStateEffectDiagnostics = await runOxlint({
+      rootDirectory: BASIC_REACT_DIRECTORY,
+      project: buildTestProject({
+        rootDirectory: BASIC_REACT_DIRECTORY,
+        hasTanStackQuery: true,
+      }),
+      userConfig: {
+        rules: buildIsolatedDerivedStateRuleConfig("no-derived-state-effect"),
+      },
+    });
     expect(diagnostics.length).toBeGreaterThan(0);
   });
 
   it("detects no-derived-state-effect with React.useEffect", () => {
-    const issues = findDiagnosticsInFile(diagnostics, "no-derived-state-effect", "namespace-hooks");
+    const issues = findDiagnosticsInFile(
+      isolatedDerivedStateEffectDiagnostics,
+      "no-derived-state-effect",
+      "namespace-hooks",
+    );
     expect(issues.length).toBeGreaterThan(0);
     expect(issues[0].message).toContain("derive from other values");
   });
@@ -49,10 +64,9 @@ describe("namespace hook detection (React.useEffect, React.useState, etc.)", () 
     expect(issues[0].message).toContain("fetch() inside useEffect");
   });
 
-  it("detects no-cascading-set-state with React.useEffect", () => {
+  it("does not detect the retired no-cascading-set-state rule", () => {
     const issues = findDiagnosticsInFile(diagnostics, "no-cascading-set-state", "namespace-hooks");
-    expect(issues.length).toBeGreaterThan(0);
-    expect(issues[0].message).toContain("setState calls in one useEffect");
+    expect(issues).toHaveLength(0);
   });
 
   it("detects no-effect-event-handler with React.useEffect", () => {
@@ -125,7 +139,6 @@ describe("namespace hook detection (React.useEffect, React.useState, etc.)", () 
 
     const setterRules = new Set([
       "no-derived-state-effect",
-      "no-cascading-set-state",
       "rerender-functional-setstate",
       "rendering-hydration-no-flicker",
     ]);
@@ -143,7 +156,6 @@ describe("namespace hook detection (React.useEffect, React.useState, etc.)", () 
     const directImportRules = [
       "no-derived-state-effect",
       "no-fetch-in-effect",
-      "no-cascading-set-state",
       "no-effect-event-handler",
       "no-derived-useState",
       "rerender-lazy-state-init",
@@ -152,7 +164,9 @@ describe("namespace hook detection (React.useEffect, React.useState, etc.)", () 
     ];
 
     for (const rule of directImportRules) {
-      const stateIssues = findDiagnosticsInFile(diagnostics, rule, "state-issues");
+      const sourceDiagnostics =
+        rule === "no-derived-state-effect" ? isolatedDerivedStateEffectDiagnostics : diagnostics;
+      const stateIssues = findDiagnosticsInFile(sourceDiagnostics, rule, "state-issues");
       expect(
         stateIssues.length,
         `expected ${rule} to still fire on state-issues.tsx`,

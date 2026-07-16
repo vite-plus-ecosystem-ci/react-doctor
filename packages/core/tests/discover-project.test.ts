@@ -19,6 +19,22 @@ describe("discoverProject", () => {
     expect(projectInfo.reactVersion).toBe("^19.0.0");
   });
 
+  it("detects React from a UTF-8 BOM-prefixed package.json", () => {
+    const projectDirectory = path.join(tempDirectory, "bom-prefixed-package-json");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      `\uFEFF${JSON.stringify({
+        name: "bom-prefixed-package-json",
+        dependencies: { react: "^18.3.1" },
+      })}`,
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.reactVersion).toBe("^18.3.1");
+    expect(projectInfo.reactMajorVersion).toBe(18);
+  });
+
   it("returns a valid framework", () => {
     const projectInfo = discoverProject(path.join(FIXTURES_DIRECTORY, "basic-react"));
     expect(VALID_FRAMEWORKS).toContain(projectInfo.framework);
@@ -663,6 +679,7 @@ describe("discoverProject", () => {
 
     const projectInfo = discoverProject(projectDirectory);
     expect(projectInfo.hasReactCompiler).toBe(false);
+    expect(projectInfo.hasReactCompilerLintPlugin).toBe(false);
   });
 
   it("detects React Compiler when next.config sets reactCompiler to true", () => {
@@ -682,6 +699,89 @@ describe("discoverProject", () => {
 
     const projectInfo = discoverProject(projectDirectory);
     expect(projectInfo.hasReactCompiler).toBe(true);
+  });
+
+  it("does not treat the React Compiler ESLint plugin as a build transform", () => {
+    const projectDirectory = path.join(tempDirectory, "react-compiler-eslint-only");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "react-compiler-eslint-only",
+        dependencies: { react: "^19.0.0" },
+        devDependencies: { "eslint-plugin-react-compiler": "^19.0.0-beta" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.hasReactCompiler).toBe(false);
+    expect(projectInfo.hasReactCompilerLintPlugin).toBe(true);
+  });
+
+  it("does not treat a React Compiler ESLint plugin reference in build config as a transform", () => {
+    const projectDirectory = path.join(tempDirectory, "react-compiler-eslint-config-only");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "react-compiler-eslint-config-only",
+        dependencies: { react: "^19.0.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "vite.config.ts"),
+      "const lintPlugin = 'eslint-plugin-react-compiler';\nexport default { lintPlugin };\n",
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.hasReactCompiler).toBe(false);
+    expect(projectInfo.hasReactCompilerLintPlugin).toBe(false);
+  });
+
+  it("does not inherit React Compiler capability from ancestor lint tooling", () => {
+    const workspaceDirectory = path.join(tempDirectory, "react-compiler-eslint-workspace");
+    const projectDirectory = path.join(workspaceDirectory, "packages", "app");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(workspaceDirectory, "package.json"),
+      JSON.stringify({
+        name: "react-compiler-eslint-workspace",
+        private: true,
+        devDependencies: { "eslint-plugin-react-compiler": "^19.0.0-beta" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "app",
+        dependencies: { react: "^19.0.0" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.hasReactCompiler).toBe(false);
+    expect(projectInfo.hasReactCompilerLintPlugin).toBe(true);
+  });
+
+  it("detects a Babel Compiler transform alongside the ESLint plugin", () => {
+    const projectDirectory = path.join(tempDirectory, "react-compiler-eslint-and-babel");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "react-compiler-eslint-and-babel",
+        dependencies: { react: "^19.0.0" },
+        devDependencies: { "eslint-plugin-react-compiler": "^19.0.0-beta" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "babel.config.js"),
+      "module.exports = { plugins: ['babel-plugin-react-compiler'] };\n",
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.hasReactCompiler).toBe(true);
+    expect(projectInfo.hasReactCompilerLintPlugin).toBe(true);
   });
 });
 
@@ -899,6 +999,147 @@ describe("listWorkspacePackages", () => {
   });
 });
 
+describe("discoverProject — node-resolution React fallback", () => {
+  const writeInstalledReact = (rootDirectory: string, version: string): void => {
+    const reactDirectory = path.join(rootDirectory, "node_modules", "react");
+    fs.mkdirSync(reactDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(reactDirectory, "package.json"),
+      JSON.stringify({ name: "react", version, main: "index.js" }),
+    );
+    fs.writeFileSync(path.join(reactDirectory, "index.js"), "module.exports = {};\n");
+  };
+
+  it("resolves the installed React version when the declaration is version-less", () => {
+    const projectDirectory = path.join(tempDirectory, "react-workspace-protocol-installed");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({ name: "widget", dependencies: { react: "workspace:*" } }),
+    );
+    writeInstalledReact(projectDirectory, "19.1.0");
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.reactVersion).toBe("19.1.0");
+    expect(projectInfo.reactMajorVersion).toBe(19);
+  });
+
+  it("detects React hoisted into an enclosing node_modules with no declaration", () => {
+    const repositoryRoot = path.join(tempDirectory, "hoisted-react-repo");
+    const packageDirectory = path.join(repositoryRoot, "packages", "widget");
+    fs.mkdirSync(path.join(repositoryRoot, ".git"), { recursive: true });
+    fs.mkdirSync(packageDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(packageDirectory, "package.json"),
+      JSON.stringify({ name: "widget" }),
+    );
+    writeInstalledReact(repositoryRoot, "18.3.1");
+
+    const projectInfo = discoverProject(packageDirectory);
+    expect(projectInfo.reactVersion).toBe("18.3.1");
+    expect(projectInfo.reactMajorVersion).toBe(18);
+  });
+
+  it("does not adopt a React installed outside the enclosing repo boundary", () => {
+    const outsideDirectory = path.join(tempDirectory, "containment-outside");
+    const repositoryRoot = path.join(outsideDirectory, "repo");
+    fs.mkdirSync(path.join(repositoryRoot, ".git"), { recursive: true });
+    fs.writeFileSync(path.join(repositoryRoot, "package.json"), JSON.stringify({ name: "repo" }));
+    // React lives one level ABOVE the git root, so the guard rejects it.
+    writeInstalledReact(outsideDirectory, "18.0.0");
+
+    const projectInfo = discoverProject(repositoryRoot);
+    expect(projectInfo.reactVersion).toBeNull();
+    expect(projectInfo.reactMajorVersion).toBeNull();
+  });
+
+  it("leaves a parseable peer range untouched even when a different React is installed", () => {
+    const projectDirectory = path.join(tempDirectory, "peer-range-installed");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "component-lib",
+        peerDependencies: { react: "^18.0.0 || ^19.0.0" },
+      }),
+    );
+    writeInstalledReact(projectDirectory, "19.5.0");
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.reactVersion).toBe("^18.0.0 || ^19.0.0");
+    expect(projectInfo.reactMajorVersion).toBe(18);
+  });
+
+  it("does not override a concrete declared version with a different install", () => {
+    const projectDirectory = path.join(tempDirectory, "concrete-not-overridden");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({ name: "app", dependencies: { react: "18.2.0" } }),
+    );
+    writeInstalledReact(projectDirectory, "19.9.9");
+
+    // The declared concrete version parses to a major, so the fallback stays out.
+    expect(discoverProject(projectDirectory).reactVersion).toBe("18.2.0");
+  });
+
+  it("detects React when the project's node_modules is symlinked outside the repo", () => {
+    // Docker-volume / shared-store shape: node_modules is a symlink to a
+    // directory outside the working tree, but it is still the project's install.
+    const storeDirectory = path.join(tempDirectory, "symlink-store");
+    const reactInStore = path.join(storeDirectory, "react");
+    fs.mkdirSync(reactInStore, { recursive: true });
+    fs.writeFileSync(
+      path.join(reactInStore, "package.json"),
+      JSON.stringify({ name: "react", version: "19.0.0" }),
+    );
+    const repositoryRoot = path.join(tempDirectory, "symlink-repo");
+    fs.mkdirSync(path.join(repositoryRoot, ".git"), { recursive: true });
+    fs.writeFileSync(
+      path.join(repositoryRoot, "package.json"),
+      JSON.stringify({ name: "repo", dependencies: { react: "*" } }),
+    );
+    fs.symlinkSync(storeDirectory, path.join(repositoryRoot, "node_modules"));
+
+    expect(discoverProject(repositoryRoot).reactVersion).toBe("19.0.0");
+  });
+
+  it("does not walk to a global node_modules when the scan tree has no boundary", () => {
+    // No git root and no workspace marker: the search floors at the scanned
+    // package, so a React hoisted above it isn't adopted.
+    const parentDirectory = path.join(tempDirectory, "no-boundary-parent");
+    fs.mkdirSync(parentDirectory, { recursive: true });
+    writeInstalledReact(parentDirectory, "18.0.0");
+    const packageDirectory = path.join(parentDirectory, "pkg");
+    fs.mkdirSync(packageDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(packageDirectory, "package.json"),
+      JSON.stringify({ name: "pkg", dependencies: { react: "*" } }),
+    );
+
+    // The fallback fires (`*` has no major) but floors at the package, so the
+    // hoisted `18.0.0` is not adopted — the declared `*` is left in place.
+    const projectInfo = discoverProject(packageDirectory);
+    expect(projectInfo.reactVersion).toBe("*");
+    expect(projectInfo.reactMajorVersion).toBeNull();
+  });
+
+  it("ignores an installed React whose package.json has no usable version", () => {
+    const projectDirectory = path.join(tempDirectory, "installed-no-version");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({ name: "app", dependencies: { react: "*" } }),
+    );
+    const reactDirectory = path.join(projectDirectory, "node_modules", "react");
+    fs.mkdirSync(reactDirectory, { recursive: true });
+    fs.writeFileSync(path.join(reactDirectory, "package.json"), JSON.stringify({ name: "react" }));
+
+    // `react: "*"` parses to no major and the install has no version → stays as-is.
+    expect(discoverProject(projectDirectory).reactVersion).toBe("*");
+  });
+});
+
 const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "react-doctor-discover-test-"));
 
 afterAll(() => {
@@ -950,6 +1191,40 @@ describe("discoverProject without a package.json", () => {
     const projectInfo = discoverProject(subdirectory);
     expect(projectInfo.reactVersion).toBe("^19.0.0");
     expect(projectInfo.rootDirectory).toBe(subdirectory);
+  });
+
+  it("inherits React detection from a plain (non-monorepo) enclosing app root", () => {
+    const appRoot = path.join(tempDirectory, "plain-react-app");
+    const subdirectory = path.join(appRoot, "src", "components");
+    fs.mkdirSync(subdirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(appRoot, "package.json"),
+      JSON.stringify({ name: "plain-react-app", dependencies: { react: "^19.0.0" } }),
+    );
+    fs.writeFileSync(path.join(subdirectory, "button.tsx"), "export const ok = true;\n");
+
+    // `src/components` has no package.json and the app is not a workspace root,
+    // so the nearest-ancestor walk adopts the app root to keep React on.
+    const projectInfo = discoverProject(subdirectory);
+    expect(projectInfo.reactVersion).toBe("^19.0.0");
+    expect(projectInfo.rootDirectory).toBe(subdirectory);
+  });
+
+  it("does not escape a boundary scan directory to an ancestor package.json", () => {
+    const outsideDirectory = path.join(tempDirectory, "boundary-escape-outside");
+    const repositoryRoot = path.join(outsideDirectory, "repo");
+    fs.mkdirSync(path.join(repositoryRoot, ".git"), { recursive: true });
+    // An unrelated React package.json ABOVE the repo boundary.
+    fs.writeFileSync(
+      path.join(outsideDirectory, "package.json"),
+      JSON.stringify({ name: "outside", dependencies: { react: "^19.0.0" } }),
+    );
+    // The repo root is a git boundary with no package.json of its own, just source.
+    fs.writeFileSync(path.join(repositoryRoot, "index.ts"), "export const ok = true;\n");
+
+    const projectInfo = discoverProject(repositoryRoot);
+    expect(projectInfo.reactVersion).toBeNull();
+    expect(projectInfo.rootDirectory).toBe(repositoryRoot);
   });
 
   it("throws PackageJsonNotFoundError for an empty directory with nothing to scan", () => {
@@ -1360,6 +1635,7 @@ describe("discoverProject — hasReanimated", () => {
 
     const projectInfo = discoverProject(projectDirectory);
     expect(projectInfo.hasReanimated).toBe(true);
+    expect(projectInfo.reanimatedVersion).toBe("~3.16.0");
   });
 
   it("is true when a workspace sibling declares `react-native-reanimated` (web-rooted monorepo)", () => {
@@ -1724,5 +2000,135 @@ describe("discoverProject — Next.js version", () => {
     const projectInfo = discoverProject(projectDirectory);
     expect(projectInfo.nextjsVersion).toBeNull();
     expect(projectInfo.nextjsMajorVersion).toBeNull();
+  });
+});
+
+describe("discoverProject — Next.js static export", () => {
+  it('detects `output: "export"` from the scan root\'s own next.config', () => {
+    const projectDirectory = path.join(tempDirectory, "static-export-root");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "static-export-root",
+        dependencies: { next: "^15.3.0", react: "^19.0.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "next.config.mjs"),
+      'export default { output: "export" };\n',
+    );
+
+    expect(discoverProject(projectDirectory).isStaticExport).toBe(true);
+  });
+
+  it("detects a workspace-level static export when scanning the monorepo root (#976)", () => {
+    const monorepoRoot = path.join(tempDirectory, "static-export-workspace");
+    const webDirectory = path.join(monorepoRoot, "apps", "web");
+    fs.mkdirSync(webDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({ name: "root", private: true, workspaces: ["apps/*"] }),
+    );
+    fs.writeFileSync(
+      path.join(webDirectory, "package.json"),
+      JSON.stringify({
+        name: "web",
+        dependencies: { next: "^15.3.0", react: "^19.0.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(webDirectory, "next.config.mjs"),
+      'export default { output: "export" };\n',
+    );
+
+    const projectInfo = discoverProject(monorepoRoot);
+    expect(projectInfo.framework).toBe("nextjs");
+    expect(projectInfo.isStaticExport).toBe(true);
+  });
+
+  it("attributes static export to the first workspace (walk order) that declares `next`", () => {
+    // Documented first-match semantics: with several Next workspaces, the
+    // config read follows the same workspace that supplied `nextjsVersion`.
+    const monorepoRoot = path.join(tempDirectory, "static-export-two-apps");
+    const adminDirectory = path.join(monorepoRoot, "apps", "admin");
+    const webDirectory = path.join(monorepoRoot, "apps", "web");
+    fs.mkdirSync(adminDirectory, { recursive: true });
+    fs.mkdirSync(webDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({ name: "root", private: true, workspaces: ["apps/*"] }),
+    );
+    fs.writeFileSync(
+      path.join(adminDirectory, "package.json"),
+      JSON.stringify({ name: "admin", dependencies: { next: "^15.3.0", react: "^19.0.0" } }),
+    );
+    fs.writeFileSync(
+      path.join(webDirectory, "package.json"),
+      JSON.stringify({ name: "web", dependencies: { next: "^15.3.0", react: "^19.0.0" } }),
+    );
+    // Only the LATER workspace (apps/web) exports; apps/admin sorts first and
+    // supplies the `next` signal, so the project is not a static export.
+    fs.writeFileSync(
+      path.join(webDirectory, "next.config.mjs"),
+      'export default { output: "export" };\n',
+    );
+
+    const projectInfo = discoverProject(monorepoRoot);
+    expect(projectInfo.framework).toBe("nextjs");
+    expect(projectInfo.isStaticExport).toBe(false);
+  });
+
+  it("classifies a web+mobile monorepo by the web framework regardless of walk order", () => {
+    // apps/a-mobile sorts before apps/web, but the cross-workspace merge is
+    // priority-ranked (web over mobile, mirroring detectFramework), so the
+    // Expo workspace must not claim the framework slot.
+    const monorepoRoot = path.join(tempDirectory, "web-mobile-priority");
+    const mobileDirectory = path.join(monorepoRoot, "apps", "a-mobile");
+    const webDirectory = path.join(monorepoRoot, "apps", "web");
+    fs.mkdirSync(mobileDirectory, { recursive: true });
+    fs.mkdirSync(webDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({ name: "root", private: true, workspaces: ["apps/*"] }),
+    );
+    fs.writeFileSync(
+      path.join(mobileDirectory, "package.json"),
+      JSON.stringify({
+        name: "a-mobile",
+        dependencies: { expo: "~52.0.0", react: "18.3.1", "react-native": "0.76.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(webDirectory, "package.json"),
+      JSON.stringify({ name: "web", dependencies: { next: "^15.3.0", react: "^19.0.0" } }),
+    );
+
+    const projectInfo = discoverProject(monorepoRoot);
+    expect(projectInfo.framework).toBe("nextjs");
+    expect(projectInfo.nextjsMajorVersion).toBe(15);
+    // The mobile workspace still surfaces through the RN/Expo facts.
+    expect(projectInfo.hasReactNativeWorkspace).toBe(true);
+    expect(projectInfo.expoVersion).toBe("~52.0.0");
+  });
+
+  it("stays false when no next.config sets output: export anywhere", () => {
+    const monorepoRoot = path.join(tempDirectory, "static-export-none");
+    const webDirectory = path.join(monorepoRoot, "apps", "web");
+    fs.mkdirSync(webDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({ name: "root", private: true, workspaces: ["apps/*"] }),
+    );
+    fs.writeFileSync(
+      path.join(webDirectory, "package.json"),
+      JSON.stringify({ name: "web", dependencies: { next: "^15.3.0", react: "^19.0.0" } }),
+    );
+    fs.writeFileSync(
+      path.join(webDirectory, "next.config.mjs"),
+      "export default { reactStrictMode: true };\n",
+    );
+
+    expect(discoverProject(monorepoRoot).isStaticExport).toBe(false);
   });
 });

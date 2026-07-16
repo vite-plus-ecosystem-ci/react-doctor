@@ -8,6 +8,7 @@ import {
   DEFAULT_PROJECT_SCAN_CONCURRENCY,
   getChangedLineRanges,
   getDiffInfo,
+  hasReactRuntime,
   highlighter,
   mapWithConcurrency,
   mergeReactDoctorConfigs,
@@ -30,6 +31,7 @@ import { getStagedSourceFiles, materializeStagedFiles } from "../utils/get-stage
 import type { InspectFlags } from "../utils/inspect-flags.js";
 import { filterDiagnosticsByCategories } from "../utils/filter-diagnostics-by-categories.js";
 import { handleError, handleUserError } from "../utils/handle-error.js";
+import { hasLintHardFailure } from "../utils/has-lint-hard-failure.js";
 import { isDebugFlagEnabled } from "../utils/is-debug-flag.js";
 import { isShareOptedOut } from "../utils/is-share-opted-out.js";
 import { isExpectedUserError } from "../utils/is-expected-user-error.js";
@@ -75,8 +77,10 @@ import { shouldBlockCi } from "../utils/should-block-ci.js";
 import { shouldSkipPrompts } from "../utils/should-skip-prompts.js";
 import { warnDeprecatedFailOn } from "../utils/warn-deprecated-fail-on.js";
 import { warnIfAiTrainingEnvironment } from "../utils/warn-ai-training-environment.js";
-import { validateModeFlags } from "../utils/validate-mode-flags.js";
+import { validateIncludeUntrackedScope, validateModeFlags } from "../utils/validate-mode-flags.js";
 import { VERSION } from "../utils/version.js";
+import { findStagedSnapshotDivergences } from "../utils/find-staged-snapshot-divergences.js";
+import { CliInputError } from "../utils/cli-input-error.js";
 
 interface CompletedScan {
   directory: string;
@@ -124,9 +128,14 @@ interface FinalizeScansInput {
 /**
  * Post-scan finalization shared by the staged-arm and project-loop
  * paths of `inspectAction`: emit the JSON report (when in JSON mode)
- * and set `process.exitCode = 1` when a diagnostic at or above the
- * `--blocking` threshold (default `"error"`) reaches the `ciFailure`
- * surface. `--blocking none` keeps the scan advisory (always exits 0).
+ * and set `process.exitCode = 1` when any scan's lint pass hard-failed
+ * (an engine/plugin/binding failure destroys the findings, so success
+ * would be a false clean) or a diagnostic at or above the `--blocking`
+ * threshold (default `"error"`) reaches the `ciFailure` surface.
+ * `--blocking none` keeps the scan advisory (always exits 0), and
+ * fail-open degradations — `--no-lint`, `--max-duration` truncation,
+ * supply-chain/security skips — stay advisory too, surfaced through
+ * `complete: false` in the JSON report.
  */
 const finalizeScans = (input: FinalizeScansInput): void => {
   // Aggregate the per-project baseline deltas into one report-level block so the
@@ -155,6 +164,13 @@ const finalizeScans = (input: FinalizeScansInput): void => {
     input.completedScans.every((scan) => scan.result.baselineDelta !== undefined);
   const baselineDegraded = input.baselineIntended && !baselineComputed;
   const mode: JsonReportMode = baselineDegraded ? "diff" : input.mode;
+  const isReactDetected = input.completedScans.some((scan) => hasReactRuntime(scan.result.project));
+  if (input.completedScans.length > 0 && !isReactDetected) {
+    recordCount(METRIC.scanNoReactDetected, 1);
+    logger.warn(
+      `No React project detected at ${input.resolvedDirectory} — React rules were gated off; this is not the same as a clean scan.`,
+    );
+  }
   const jsonCompletedScans = filterCompletedScansByCategories(
     input.completedScans,
     input.categoryFilters,
@@ -186,10 +202,17 @@ const finalizeScans = (input: FinalizeScansInput): void => {
     );
   }
 
+  const blockingLevel = resolveBlockingLevel(input.flags, input.userConfig);
+  const hasHardFailedScan = input.completedScans.some(({ result }) => hasLintHardFailure(result));
+  if (hasHardFailedScan && blockingLevel !== "none") {
+    process.exitCode = 1;
+    return;
+  }
+
   if (input.isScoreOnly || baselineDegraded) return;
 
   const ciFailureDiagnostics = filterScansForSurface(input.completedScans, "ciFailure");
-  if (shouldBlockCi(ciFailureDiagnostics, resolveBlockingLevel(input.flags, input.userConfig))) {
+  if (shouldBlockCi(ciFailureDiagnostics, blockingLevel)) {
     process.exitCode = 1;
   }
 };
@@ -257,6 +280,8 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
   try {
     validateModeFlags(flags);
 
+    if (flags.staged) setJsonReportMode("staged");
+
     await maybeMigrateLegacyConfig(requestedDirectory, {
       isQuiet,
       isStaged: Boolean(flags.staged),
@@ -276,6 +301,26 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
         `Redirected to ${highlighter.info(toRelativePath(resolvedDirectory, requestedDirectory))} via react-doctor config "rootDir".`,
       );
       logger.break();
+    }
+
+    // Checked against the resolved directory (after any `rootDir` redirect) —
+    // the staged scan materializes from there, so a divergence check on the
+    // requested directory would let a redirected repo's mixed snapshot through.
+    if (flags.staged) {
+      const divergentConfigFiles = findStagedSnapshotDivergences(resolvedDirectory);
+      if (divergentConfigFiles === null) {
+        throw new CliInputError(
+          "Could not verify that staged configuration matches the worktree. Run the command from a Git worktree with Git available.",
+        );
+      }
+      if (divergentConfigFiles.length > 0) {
+        recordCount(METRIC.stagedSnapshotDivergence, 1, {
+          divergentInputCount: divergentConfigFiles.length,
+        });
+        throw new CliInputError(
+          `Cannot scan staged files while configuration differs between the index and worktree: ${divergentConfigFiles.join(", ")}. Stage or restore those files, then rerun react-doctor --staged.`,
+        );
+      }
     }
 
     const explainArgument = flags.explain;
@@ -321,7 +366,6 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
     const skipPrompts = shouldSkipPrompts({ yes: flags.yes, json: flags.json });
 
     if (flags.staged) {
-      setJsonReportMode("staged");
       const stagedFiles = await getStagedSourceFiles(resolvedDirectory);
       if (stagedFiles.length === 0) {
         if (isJsonMode) {
@@ -434,6 +478,9 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
       ? buildChangedFilesDiffInfo(readChangedFilesFrom(path.resolve(flags.changedFilesFrom)))
       : null;
     const requestedScope = resolveScope(flags, userConfig);
+    // Untracked files only exist in a local working tree, so this is a
+    // CLI-only modifier (like `--staged`) — off unless the user opts in.
+    const includeUntracked = flags.includeUntracked ?? false;
     // The internal `--changed-files-from` path (the GitHub Action) implies the
     // `changed` scope when the user didn't pick one explicitly — it always ran
     // in diff mode historically.
@@ -441,6 +488,10 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
       requestedScope.scope === undefined && changedFilesDiffInfo !== null
         ? { ...requestedScope, scope: "changed" }
         : requestedScope;
+    // Validate against the EFFECTIVE scope (post `--changed-files-from`
+    // promotion), so a working-tree scope from a flag, `config.scope` /
+    // `config.diff`, or that internal path all satisfy the requirement.
+    validateIncludeUntrackedScope(includeUntracked, scopeRequest.scope);
     const wantsDiffMode = scopeRequest.scope !== undefined && scopeRequest.scope !== "full";
     // HACK: also call getDiffInfo when we MIGHT prompt the user — without it the
     // "full vs changed" prompt never appears for users on a feature branch who
@@ -450,7 +501,9 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
       (wantsDiffMode || (scopeRequest.scope === undefined && !skipPrompts && !isQuiet));
     const diffInfo =
       changedFilesDiffInfo ??
-      (shouldDetectDiff ? await getDiffInfo(resolvedDirectory, scopeRequest.base) : null);
+      (shouldDetectDiff
+        ? await getDiffInfo(resolvedDirectory, scopeRequest.base, includeUntracked)
+        : null);
     const scope = await finalizeScope({ requested: scopeRequest, diffInfo, skipPrompts, isQuiet });
     const isDiffMode = scope !== "full";
 
@@ -489,6 +542,7 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
             directory: resolvedDirectory,
             baseRef: linesBaseRef ?? undefined,
             files: [...diffInfo.changedFiles],
+            includeUntracked,
           })
         : null;
     if (scope === "lines" && changedLineRanges === null && !isQuiet) {
@@ -541,10 +595,10 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
         projectScanTarget.userConfig?.plugins === undefined
           ? scanTarget.configSourceDirectory
           : projectScanTarget.configSourceDirectory;
-      // The Socket supply-chain check runs by default; opted out per project
-      // config. Off ⇒ a manifest-only diff change shouldn't pull a project into
-      // the scan (there'd be nothing to report).
-      const supplyChainEnabled = projectConfig?.supplyChain?.enabled !== false;
+      // The Socket supply-chain check runs by default; opted out by
+      // `--no-supply-chain` (wins) or per-project config. Off ⇒ a manifest-only
+      // diff change shouldn't pull a project into the scan (nothing to report).
+      const supplyChainEnabled = flags.supplyChain ?? projectConfig?.supplyChain?.enabled !== false;
 
       let includePaths: string[] | undefined;
       let supplyChainManifestChanged = false;

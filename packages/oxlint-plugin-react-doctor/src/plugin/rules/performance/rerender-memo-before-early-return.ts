@@ -1,5 +1,7 @@
+import { areExpressionsStructurallyEqual } from "../../utils/are-expressions-structurally-equal.js";
 import { collectReferenceIdentifierNames } from "../../utils/collect-reference-identifier-names.js";
 import { defineRule } from "../../utils/define-rule.js";
+import { functionReturnsMatchingExpression } from "../../utils/function-returns-matching-expression.js";
 import { isComponentAssignment } from "../../utils/is-component-assignment.js";
 import { isHookCall } from "../../utils/is-hook-call.js";
 import { isJsxElementOrFragment } from "../../utils/is-jsx-element-or-fragment.js";
@@ -9,11 +11,17 @@ import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
+import type { ScopeAnalysis } from "../../semantic/scope-analysis.js";
+import type { ControlFlowAnalysis } from "../../semantic/control-flow-graph.js";
 
 const isJsxExpression = (node: EsTreeNode | null | undefined): boolean =>
   Boolean(node && isJsxElementOrFragment(stripParenExpression(node)));
 
-const callbackReturnsJsx = (callback: EsTreeNode | undefined): boolean => {
+const callbackReturnsJsx = (
+  callback: EsTreeNode | undefined,
+  scopes: ScopeAnalysis,
+  controlFlow: ControlFlowAnalysis,
+): boolean => {
   if (!callback) return false;
   if (
     !isNodeOfType(callback, "ArrowFunctionExpression") &&
@@ -21,15 +29,7 @@ const callbackReturnsJsx = (callback: EsTreeNode | undefined): boolean => {
   ) {
     return false;
   }
-  const body = callback.body;
-  if (isJsxExpression(body)) return true;
-  if (!isNodeOfType(body, "BlockStatement")) return false;
-  for (const stmt of body.body ?? []) {
-    if (isNodeOfType(stmt, "ReturnStatement") && isJsxExpression(stmt.argument)) {
-      return true;
-    }
-  }
-  return false;
+  return functionReturnsMatchingExpression(callback, scopes, isJsxExpression, controlFlow);
 };
 
 const returnArgumentUsesAnyName = (
@@ -71,6 +71,74 @@ const hasEarlyReturnNotUsingMemo = (
   );
 };
 
+const expressionReferencesAnyName = (
+  expression: EsTreeNode | null | undefined,
+  names: ReadonlySet<string>,
+): boolean => {
+  if (!expression) return false;
+  const referenced = new Set<string>();
+  collectReferenceIdentifierNames(stripParenExpression(expression), referenced);
+  for (const name of names) {
+    if (referenced.has(name)) return true;
+  }
+  return false;
+};
+
+// Structural equality for guard conditions. The shared helper only models
+// value-shaped expressions; bailout tests routinely combine them with
+// `!`, `===`, and `&&`/`||`, so handle those shapes here and delegate the
+// leaves.
+const areConditionsStructurallyEqual = (
+  a: EsTreeNode | null | undefined,
+  b: EsTreeNode | null | undefined,
+): boolean => {
+  if (!a || !b) return false;
+  const strippedA = stripParenExpression(a);
+  const strippedB = stripParenExpression(b);
+  if (strippedA.type !== strippedB.type) return false;
+  if (
+    (isNodeOfType(strippedA, "LogicalExpression") &&
+      isNodeOfType(strippedB, "LogicalExpression")) ||
+    (isNodeOfType(strippedA, "BinaryExpression") && isNodeOfType(strippedB, "BinaryExpression"))
+  ) {
+    return (
+      strippedA.operator === strippedB.operator &&
+      areConditionsStructurallyEqual(strippedA.left, strippedB.left) &&
+      areConditionsStructurallyEqual(strippedA.right, strippedB.right)
+    );
+  }
+  if (isNodeOfType(strippedA, "UnaryExpression") && isNodeOfType(strippedB, "UnaryExpression")) {
+    return (
+      strippedA.operator === strippedB.operator &&
+      areConditionsStructurallyEqual(strippedA.argument, strippedB.argument)
+    );
+  }
+  return areExpressionsStructurallyEqual(strippedA, strippedB);
+};
+
+// Leading `if (test) return ...;` guard clauses of the memo callback. When
+// the component's early-return test matches one of these, the callback
+// bails on the same condition the component does — the "wasted" work on a
+// bailout render is a single comparison, not the JSX build.
+const collectLeadingCallbackGuardTests = (callback: EsTreeNode | undefined): EsTreeNode[] => {
+  if (!callback) return [];
+  const body = (callback as { body?: EsTreeNode }).body;
+  if (!isNodeOfType(body, "BlockStatement")) return [];
+  const guardTests: EsTreeNode[] = [];
+  for (const stmt of body.body ?? []) {
+    if (!isNodeOfType(stmt, "IfStatement") || !stmt.test) break;
+    const consequent = stmt.consequent;
+    const isImmediateReturn =
+      isNodeOfType(consequent, "ReturnStatement") ||
+      (isNodeOfType(consequent, "BlockStatement") &&
+        (consequent.body ?? []).length === 1 &&
+        isNodeOfType(consequent.body?.[0], "ReturnStatement"));
+    if (!isImmediateReturn) break;
+    guardTests.push(stmt.test);
+  }
+  return guardTests;
+};
+
 const addTransitiveConsumerNames = (
   statement: EsTreeNode,
   memoConsumerNames: Set<string>,
@@ -104,6 +172,7 @@ export const rerenderMemoBeforeEarlyReturn = defineRule({
   create: (context: RuleContext) => {
     const inspectFunctionBody = (statements: EsTreeNode[]): void => {
       let memoNode: EsTreeNode | null = null;
+      let callbackGuardTests: EsTreeNode[] = [];
       const memoConsumerNames = new Set<string>();
 
       for (const stmt of statements) {
@@ -114,9 +183,10 @@ export const rerenderMemoBeforeEarlyReturn = defineRule({
             if (
               isNodeOfType(init, "CallExpression") &&
               isHookCall(init, "useMemo") &&
-              callbackReturnsJsx(init.arguments?.[0])
+              callbackReturnsJsx(init.arguments?.[0], context.scopes, context.cfg)
             ) {
               memoNode = declarator;
+              callbackGuardTests = collectLeadingCallbackGuardTests(init.arguments?.[0]);
               if (isNodeOfType(declarator.id, "Identifier")) {
                 memoConsumerNames.add(declarator.id.name);
               }
@@ -131,6 +201,19 @@ export const rerenderMemoBeforeEarlyReturn = defineRule({
           memoConsumerNames.size > 0 &&
           hasEarlyReturnNotUsingMemo(stmt, memoConsumerNames)
         ) {
+          // Bail-decision reads the memo: `if (!content) return null;` has
+          // to run the memo to know whether to return, so nothing is
+          // wasted on the bailout path.
+          if (expressionReferencesAnyName(stmt.test, memoConsumerNames)) continue;
+          // The callback re-checks the same condition first and bails
+          // cheaply, so the pre-return placement costs one comparison.
+          if (
+            callbackGuardTests.some((guardTest) =>
+              areConditionsStructurallyEqual(stmt.test, guardTest),
+            )
+          ) {
+            continue;
+          }
           context.report({
             node: memoNode,
             message:

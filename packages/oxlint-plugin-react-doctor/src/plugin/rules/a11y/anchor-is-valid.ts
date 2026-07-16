@@ -1,10 +1,14 @@
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
+import { flattenJsxName } from "../../utils/flatten-jsx-name.js";
 import { getElementType } from "../../utils/get-element-type.js";
-import { getStaticTemplateLiteralValue } from "../../utils/get-static-template-literal-value.js";
+import { getJsxPropStaticStringValues } from "../../utils/get-jsx-prop-static-string-values.js";
+import { hasJsxA11ySettings } from "../../utils/has-jsx-a11y-settings.js";
 import { hasJsxPropIgnoreCase } from "../../utils/has-jsx-prop-ignore-case.js";
+import { hasJsxSpreadAttribute } from "../../utils/has-jsx-spread-attribute.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import { isTestlikeFilename } from "../../utils/is-testlike-filename.js";
 
 const MESSAGE_MISSING_HREF =
   "Keyboard users can't reach this link because it has no `href`, so add a real `href` (or use `<button>` for actions).";
@@ -38,29 +42,54 @@ const resolveSettings = (
   };
 };
 
-const isInvalidHref = (value: string, validHrefs: ReadonlySet<string>): boolean => {
-  if (validHrefs.has(value)) return false;
-  return value === "" || value === "#" || value === "javascript:void(0)";
+// Next.js `<Link legacyBehavior>` (and the pre-13 default) clones its child
+// `<a>` and injects the `href` at render time, so the anchor is reachable
+// even though the JSX carries no `href`. Any wrapper component named `Link`
+// (or `*Link`) gets the benefit of the doubt — it exists to supply the
+// navigation semantics the bare anchor appears to lack.
+const isDirectChildOfLinkComponent = (
+  openingElement: EsTreeNodeOfType<"JSXOpeningElement">,
+): boolean => {
+  const element = openingElement.parent;
+  if (!element || !isNodeOfType(element, "JSXElement")) return false;
+  const wrapper = element.parent;
+  if (!wrapper || !isNodeOfType(wrapper, "JSXElement")) return false;
+  const wrapperName = flattenJsxName(wrapper.openingElement.name);
+  if (!wrapperName) return false;
+  const lastSegment = wrapperName.split(".").at(-1) ?? wrapperName;
+  return lastSegment === "Link" || (lastSegment.endsWith("Link") && lastSegment.length > 4);
 };
 
-const checkValueIsEmptyOrInvalid = (
-  value: EsTreeNode,
-  validHrefs: ReadonlySet<string>,
-): boolean => {
-  if (isNodeOfType(value, "Literal")) {
-    return typeof value.value === "string" ? isInvalidHref(value.value, validHrefs) : false;
-  }
+// An href-less anchor that carries a widget `role`, is focusable via
+// `tabIndex`, and handles keys is a hand-rolled control, not an unreachable
+// link — the "can't reach this link" claim would be false. (The
+// `prefer-tag-over-role` rule separately suggests the native element for
+// `<a role="button">`.)
+const isKeyboardOperableWidgetAnchor = (
+  openingElement: EsTreeNodeOfType<"JSXOpeningElement">,
+): boolean =>
+  Boolean(hasJsxPropIgnoreCase(openingElement.attributes, "role")) &&
+  Boolean(hasJsxPropIgnoreCase(openingElement.attributes, "tabindex")) &&
+  (Boolean(hasJsxPropIgnoreCase(openingElement.attributes, "onkeydown")) ||
+    Boolean(hasJsxPropIgnoreCase(openingElement.attributes, "onkeyup")));
+
+// Mirrors oxc `is_invalid_href`: empty, `#`, or any `javascript:`-scheme
+// href (after stripping leading non-word characters, so ` javascript:;`
+// and `//javascript:` still match) goes nowhere.
+const isInvalidHref = (value: string, validHrefs: ReadonlySet<string>): boolean => {
+  if (validHrefs.has(value)) return false;
+  const withoutLeadingNonWord = value.replace(/^[^a-zA-Z0-9_]+/, "");
+  return value === "" || value === "#" || withoutLeadingNonWord.startsWith("javascript:");
+};
+
+// The string-valued cases live in `getJsxPropStaticStringValues`; this
+// covers the remaining statically-nowhere shapes: `href={undefined}`,
+// `href={null}`, and a fragment value.
+const isNullishOrFragmentHref = (value: EsTreeNode): boolean => {
   if (isNodeOfType(value, "JSXExpressionContainer")) {
     const expression = value.expression;
     if (isNodeOfType(expression, "Identifier") && expression.name === "undefined") return true;
-    if (isNodeOfType(expression, "Literal")) {
-      if (expression.value === null) return true;
-      if (typeof expression.value === "string") return isInvalidHref(expression.value, validHrefs);
-    }
-    if (isNodeOfType(expression, "TemplateLiteral")) {
-      const staticValue = getStaticTemplateLiteralValue(expression);
-      return staticValue === null ? false : isInvalidHref(staticValue, validHrefs);
-    }
+    if (isNodeOfType(expression, "Literal") && expression.value === null) return true;
   }
   if (isNodeOfType(value, "JSXFragment")) return true;
   return false;
@@ -76,9 +105,13 @@ export const anchorIsValid = defineRule({
   category: "Accessibility",
   create: (context) => {
     const settings = resolveSettings(context.settings);
+    const fileHasJsxA11ySettings = hasJsxA11ySettings(context.settings);
+    const isTestlikeFile = isTestlikeFilename(context.filename);
     return {
       JSXOpeningElement(node: EsTreeNodeOfType<"JSXOpeningElement">) {
+        if (isTestlikeFile) return;
         const tag = getElementType(node, context.settings);
+        if (!fileHasJsxA11ySettings && tag !== "a") return;
         if (tag !== "a") return;
         // First-found custom href alternative, falling back to "href".
         let hrefAttribute: ReturnType<typeof hasJsxPropIgnoreCase> | undefined;
@@ -91,8 +124,24 @@ export const anchorIsValid = defineRule({
             context.report({ node: node.name, message: MESSAGE_INCORRECT_HREF });
             return;
           }
-          if (checkValueIsEmptyOrInvalid(hrefAttribute.value as EsTreeNode, settings.validHrefs)) {
+          // Static resolution covers `href={active ? "#" : ""}` and
+          // const-bound hrefs. The "goes nowhere" claim must hold on every
+          // path, so ALL candidates have to be invalid — one reachable
+          // destination keeps the anchor silent.
+          const hrefCandidates = getJsxPropStaticStringValues(hrefAttribute, context.scopes);
+          const isEveryCandidateInvalid =
+            hrefCandidates !== null
+              ? hrefCandidates.length > 0 &&
+                hrefCandidates.every((candidate) => isInvalidHref(candidate, settings.validHrefs))
+              : isNullishOrFragmentHref(hrefAttribute.value as EsTreeNode);
+          if (isEveryCandidateInvalid) {
             const hasOnClick = Boolean(hasJsxPropIgnoreCase(node.attributes, "onClick"));
+            // `href="#"` without a click handler is a working scroll-to-top
+            // link: it is focusable and navigates to the top of the page, so
+            // the "goes nowhere" claim is false (docs-validation FP cluster).
+            if (!hasOnClick && hrefCandidates?.every((candidate) => candidate === "#")) {
+              return;
+            }
             context.report({
               node: node.name,
               message: hasOnClick ? MESSAGE_CANT_BE_ANCHOR : MESSAGE_INCORRECT_HREF,
@@ -101,10 +150,9 @@ export const anchorIsValid = defineRule({
           return;
         }
         // No href attribute. Skip if there's a spread (could provide href).
-        const hasSpread = node.attributes.some((attribute) =>
-          isNodeOfType(attribute as EsTreeNode, "JSXSpreadAttribute"),
-        );
-        if (hasSpread) return;
+        if (hasJsxSpreadAttribute(node.attributes)) return;
+        if (isDirectChildOfLinkComponent(node)) return;
+        if (isKeyboardOperableWidgetAnchor(node)) return;
         context.report({ node: node.name, message: MESSAGE_MISSING_HREF });
       },
     };

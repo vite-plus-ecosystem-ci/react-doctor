@@ -7,6 +7,7 @@ import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
+import { hasCustomMemoComparator } from "../../utils/has-custom-memo-comparator.js";
 import { isInsideFunctionScope } from "../../utils/is-inside-function-scope.js";
 import { isJsxAttributeOnIntrinsicHtmlElement } from "../../utils/is-on-intrinsic-html-element.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
@@ -131,7 +132,7 @@ export const jsxNoNewObjectAsProp = defineRule({
   severity: "warn",
   // React Compiler auto-memoizes prop allocations, so the perf footgun
   // this rule guards against doesn't exist in compiler-enabled projects.
-  disabledBy: ["react-compiler"],
+  disabledWhen: ["react-compiler"],
   recommendation:
     "Wrap the object in `useMemo` or move it outside the component so memoized children do not redraw every render.",
   category: "Performance",
@@ -159,6 +160,11 @@ export const jsxNoNewObjectAsProp = defineRule({
         // memoised. "unknown" and "not-memoised" both short-circuit —
         // see jsx-no-new-function-as-prop for the audit data.
         if (memoStatusForJsxOpeningName(memoRegistry, openingName) !== "memoised") return;
+        // `memo(fn, arePropsEqual)` compares props with the author's own
+        // function, which routinely ignores reference identity (antd's
+        // MemoInput, json-edit-react's CollectionNode) — a fresh object
+        // cannot break that bailout.
+        if (hasCustomMemoComparator(openingName)) return;
         if (!isInsideFunctionScope(node)) return;
         if (!isNodeOfType(node.name, "JSXIdentifier")) return;
         if (ALWAYS_FRESH_OBJECT_PROPS.has(node.name.name)) return;

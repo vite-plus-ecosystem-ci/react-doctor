@@ -1,4 +1,3 @@
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { reactDoctorRules } from "../../oxlint-plugin-react-doctor/src/plugin/rule-registry.js";
 import { runRule } from "../../oxlint-plugin-react-doctor/src/test-utils/run-rule.js";
@@ -16,7 +15,7 @@ import { loadFuzzCorpus } from "../src/load-fuzz-corpus.js";
 //   HUNT_CORPUS_DIR=tmp/corpus-repos bun scripts/hunt-false-positives.ts
 
 const packageRoot = path.resolve(import.meta.dirname, "..");
-const regressionsDirectory = path.join(packageRoot, "corpus");
+const regressionsDirectory = path.join(packageRoot, "corpus", "regressions");
 
 interface SeedHit {
   seed: string;

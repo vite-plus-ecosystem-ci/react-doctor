@@ -282,6 +282,66 @@ describe("no-direct-state-mutation — regressions", () => {
     expect(result.diagnostics[0].message).toContain("items");
   });
 
+  it("stays silent on a callback-ref DOM node written to in an effect", () => {
+    const result = runRule(
+      noDirectStateMutation,
+      `function CallbackRefCounter() {
+        const [node, setNode] = useState(null);
+        useEffect(() => {
+          if (!node) return;
+          node.dataset.mounted = "true";
+        }, [node]);
+        return <span ref={setNode}>ready</span>;
+      }`,
+      { filename: "counter.tsx" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("stays silent when a callback-ref DOM node has its style mutated inline", () => {
+    const result = runRule(
+      noDirectStateMutation,
+      `function Highlight() {
+        const [element, setElement] = useState(null);
+        if (element) element.style.outline = "2px solid";
+        return <div ref={setElement} />;
+      }`,
+      { filename: "highlight.tsx" },
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("still flags null-initialized plain-object state when the setter is not a callback ref", () => {
+    const result = runRule(
+      noDirectStateMutation,
+      `function Form() {
+        const [draft, setDraft] = useState(null);
+        const touch = () => { draft.dirty = true; };
+        return <button onClick={touch}>save</button>;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+    expect(result.diagnostics[0].message).toContain("draft");
+  });
+
+  it("does not claim the screen won't update when a setter runs after the mutation", () => {
+    const result = runRule(
+      noDirectStateMutation,
+      `function List() {
+        const [items, setItems] = useState([]);
+        const add = (x) => { items.push(x); setItems([...items]); };
+        return <button onClick={() => add(1)}>{items.length}</button>;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+    expect(result.diagnostics[0].message).not.toContain("won't update");
+    expect(result.diagnostics[0].message).toContain("items");
+  });
+
   it("stays silent on a lazy initializer returning an opaque instance", () => {
     const result = runRule(
       noDirectStateMutation,
@@ -293,5 +353,226 @@ describe("no-direct-state-mutation — regressions", () => {
     );
     expect(result.parseErrors).toEqual([]);
     expect(result.diagnostics).toEqual([]);
+  });
+
+  // bindery AuthorDetailPage: `const books = []` declared inside a for-of
+  // block shadows the state binding; pushing to it is correct local work.
+  it("stays silent when a block-scoped const inside a loop shadows the state name", () => {
+    const result = runRule(
+      noDirectStateMutation,
+      `function AuthorDetailPage({ authorSeries }) {
+        const [books, setBooks] = useState([]);
+        const seriesGroups = useMemo(() => {
+          const grouped = [];
+          for (const series of authorSeries) {
+            const books = [];
+            for (const entry of series.books) {
+              books.push(entry);
+            }
+            if (books.length > 0) grouped.push({ books });
+          }
+          return grouped;
+        }, [authorSeries]);
+        return <div>{seriesGroups.length}</div>;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  // internxt TeamsSection: `const teams = await ...` declared inside an if
+  // block shadows the state; sorting the fresh local array before setTeams
+  // is the correct immutable pattern.
+  it("stays silent when an if-block const shadows the state name", () => {
+    const result = runRule(
+      noDirectStateMutation,
+      `function TeamsSection({ selectedWorkspace }) {
+        const [teams, setTeams] = useState([]);
+        const getTeams = async () => {
+          if (selectedWorkspace) {
+            const teams = await workspacesService.getWorkspaceTeams(selectedWorkspace.id);
+            teams.sort((a, b) => a.team.name.localeCompare(b.team.name));
+            setTeams(teams);
+          }
+        };
+        return <button onClick={getTeams}>{teams.length}</button>;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("still flags a state mutation inside an if block with no shadowing", () => {
+    const result = runRule(
+      noDirectStateMutation,
+      `function List({ ready }) {
+        const [items, setItems] = useState([]);
+        const add = (x) => {
+          if (ready) {
+            items.push(x);
+          }
+        };
+        return <button onClick={() => add(1)}>{items.length}</button>;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still flags a loop-body state mutation with no shadowing", () => {
+    const result = runRule(
+      noDirectStateMutation,
+      `function List({ incoming }) {
+        const [items, setItems] = useState([]);
+        const addAll = () => {
+          for (const entry of incoming) {
+            items.push(entry);
+          }
+        };
+        return <button onClick={addAll}>{items.length}</button>;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  // A null initializer only says "the value arrives through the setter" —
+  // when every observed setter call feeds an opaque instance (WebAudio
+  // nodes, editor instances), field writes are the instance's imperative
+  // API, not a lost React update (fuzz FP hunt: cleanup-disposed resource).
+  describe("opaque instances flowing through the setter into null-init state", () => {
+    it("stays silent when the setter only receives an opaque factory result", () => {
+      const result = runRule(
+        noDirectStateMutation,
+        `function AudioNodeState() {
+          const [gainNode, setGainNode] = useState(null);
+          useEffect(() => {
+            if (!gainNode) return;
+            gainNode.gain.value = 0.5;
+          }, [gainNode]);
+          useEffect(() => {
+            const audioContext = new AudioContext();
+            setGainNode(audioContext.createGain());
+            return () => { audioContext.close(); };
+          }, []);
+          return null;
+        }`,
+      );
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toEqual([]);
+    });
+
+    it("stays silent when the setter only receives a new-expression instance", () => {
+      const result = runRule(
+        noDirectStateMutation,
+        `function EditorHost() {
+          const [editor, setEditor] = useState(null);
+          const mount = () => setEditor(new Editor());
+          const rename = () => { editor.title = "next"; };
+          return <button onClick={rename}>{String(mount)}</button>;
+        }`,
+      );
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toEqual([]);
+    });
+
+    it("still flags when the setter also receives plain data", () => {
+      const result = runRule(
+        noDirectStateMutation,
+        `function List() {
+          const [items, setItems] = useState(null);
+          const load = () => setItems([1, 2, 3]);
+          const hydrate = () => setItems(buildItems());
+          const add = () => { items.push(4); };
+          return <button onClick={add}>{String(load)}{String(hydrate)}</button>;
+        }`,
+      );
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(1);
+    });
+
+    it("still flags null-init state with no setter shape evidence", () => {
+      const result = runRule(
+        noDirectStateMutation,
+        `function Editor() {
+          const [editor, setEditor] = useState(null);
+          const attach = () => { editor.customConfig = { onchange: sync }; };
+          return <button onClick={attach}>{String(setEditor)}</button>;
+        }`,
+      );
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(1);
+    });
+
+    it("still flags when the setter receives new Array(N) plain data", () => {
+      const result = runRule(
+        noDirectStateMutation,
+        `function Board() {
+          const [cells, setCells] = useState(null);
+          const init = () => setCells(new Array(9));
+          const mark = () => { cells.fill("x"); };
+          return <button onClick={mark}>{String(init)}</button>;
+        }`,
+      );
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(1);
+    });
+
+    it("ignores opaque evidence from a shadowed same-named setter", () => {
+      const result = runRule(
+        noDirectStateMutation,
+        `function Config() {
+          const [config, setConfig] = useState(null);
+          const helper = (setConfig) => setConfig(new Registry());
+          const mutate = () => { config.items = []; };
+          return <button onClick={mutate}>{String(helper)}</button>;
+        }`,
+      );
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(1);
+    });
+
+    it("still flags when the setter receives JSON.parse plain data", () => {
+      const result = runRule(
+        noDirectStateMutation,
+        `function Settings({ raw }) {
+          const [data, setData] = useState(null);
+          const load = () => setData(JSON.parse(raw));
+          const toggle = () => { data.enabled = !data.enabled; };
+          return <button onClick={toggle}>{String(load)}</button>;
+        }`,
+      );
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(1);
+    });
+
+    it("still flags when the setter receives a copying array transform", () => {
+      const result = runRule(
+        noDirectStateMutation,
+        `function Filtered({ source }) {
+          const [rows, setRows] = useState(null);
+          const load = () => setRows(source.filter((row) => row.active));
+          const add = () => { rows.push({ active: true }); };
+          return <button onClick={add}>{String(load)}</button>;
+        }`,
+      );
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(1);
+    });
+
+    it("still flags when the setter receives a bare helper-call result", () => {
+      const result = runRule(
+        noDirectStateMutation,
+        `function CodeBox({ readOnly }) {
+          const [editor, setEditor] = useState(null);
+          useEffect(() => {
+            if (editor) editor.options.readOnly = readOnly;
+          }, [editor, readOnly]);
+          return <div ref={(el) => { if (el && !editor) setEditor(createEditor(el)); }} />;
+        }`,
+      );
+      expect(result.parseErrors).toEqual([]);
+      expect(result.diagnostics).toHaveLength(1);
+    });
   });
 });

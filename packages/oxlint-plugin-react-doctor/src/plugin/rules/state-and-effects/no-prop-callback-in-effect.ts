@@ -1,18 +1,123 @@
 import { EFFECT_HOOK_NAMES } from "../../constants/react.js";
 import { createComponentPropStackTracker } from "../../utils/create-component-prop-stack-tracker.js";
 import { defineRule } from "../../utils/define-rule.js";
+import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
+import { getCalleeName } from "../../utils/get-callee-name.js";
 import { getEffectCallback } from "../../utils/get-effect-callback.js";
 import { isHookCall } from "../../utils/is-hook-call.js";
 import { isResultDiscardedCall } from "../../utils/is-result-discarded-call.js";
+import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import type { Reference } from "eslint-scope";
 import { walkInsideStatementBlocks } from "../../utils/walk-inside-statement-blocks.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
-import { getRef } from "./utils/effect/ast.js";
+import { getRef, getUpstreamRefs } from "./utils/effect/ast.js";
 import { isExternallyDrivenState } from "./utils/effect/external-state.js";
-import { getProgramAnalysis } from "./utils/effect/get-program-analysis.js";
+import { getProgramAnalysis, type ProgramAnalysis } from "./utils/effect/get-program-analysis.js";
+import { isProp, isState } from "./utils/effect/react.js";
+
+// The ref-latch shape: the effect reads a `<ref>.current` in an
+// if-guard AND writes that same `<ref>.current`. That is the one-shot
+// completion-signal idiom (docs-validation r2: AlbumRow
+// notifyRestoreCompletePendingRef, CanonCard settledRef) — the latch
+// blocks every run but the first, so the "parent re-renders on every
+// local state change" premise is false and a Provider cannot replace a
+// completion event.
+const isRefLatchGuardedEffect = (callbackBody: EsTreeNode): boolean => {
+  const refNamesReadInGuards = new Set<string>();
+  const refNamesWritten = new Set<string>();
+  const collectCurrentReads = (expression: EsTreeNode, out: Set<string>): void => {
+    walkInsideStatementBlocks(expression, (child: EsTreeNode) => {
+      if (
+        isNodeOfType(child, "MemberExpression") &&
+        isNodeOfType(child.property, "Identifier") &&
+        child.property.name === "current" &&
+        isNodeOfType(child.object, "Identifier")
+      ) {
+        out.add(child.object.name);
+      }
+    });
+  };
+  walkInsideStatementBlocks(callbackBody, (child: EsTreeNode) => {
+    if (isNodeOfType(child, "IfStatement") && child.test) {
+      collectCurrentReads(child.test as EsTreeNode, refNamesReadInGuards);
+    }
+    if (
+      isNodeOfType(child, "AssignmentExpression") &&
+      isNodeOfType(child.left, "MemberExpression") &&
+      isNodeOfType(child.left.property, "Identifier") &&
+      child.left.property.name === "current" &&
+      isNodeOfType(child.left.object, "Identifier")
+    ) {
+      refNamesWritten.add(child.left.object.name);
+    }
+  });
+  for (const refName of refNamesReadInGuards) {
+    if (refNamesWritten.has(refName)) return true;
+  }
+  return false;
+};
+
+// An edge-triggered transition detector: one of the deps is a
+// `usePrevious(...)` binding, so the effect compares previous vs
+// current and fires the parent callback only on the transition
+// (docs-validation r2: LocalSetupPanel prevHadMissing). That is a
+// one-shot notification, not a continuous state mirror.
+const PREVIOUS_VALUE_HOOK_PATTERN = /^usePrev/i;
+
+const hasPreviousValueDep = (
+  effectNode: EsTreeNode,
+  depElements: readonly EsTreeNode[],
+): boolean => {
+  for (const element of depElements) {
+    if (!isNodeOfType(element, "Identifier")) continue;
+    const binding = findVariableInitializer(effectNode, element.name);
+    if (!binding?.initializer || !isNodeOfType(binding.initializer, "CallExpression")) continue;
+    const calleeName = getCalleeName(binding.initializer);
+    if (calleeName && PREVIOUS_VALUE_HOOK_PATTERN.test(calleeName)) return true;
+  }
+  return false;
+};
+
+const isStateLikeDependency = (
+  analysis: ProgramAnalysis | null,
+  element: EsTreeNode,
+  isPropName: (name: string) => boolean,
+): boolean => {
+  if (!isNodeOfType(element, "Identifier") || isPropName(element.name)) return false;
+  if (!analysis) return true;
+  const reference = getRef(analysis, element);
+  if (!reference) return true;
+  const upstreamReferences = getUpstreamRefs(analysis, reference);
+  if (upstreamReferences.some((upstreamReference) => isState(analysis, upstreamReference))) {
+    return true;
+  }
+  return !upstreamReferences.some((upstreamReference) => isProp(analysis, upstreamReference));
+};
+
+const getRefHeldPropCallbackName = (
+  callExpression: EsTreeNodeOfType<"CallExpression">,
+  isPropName: (name: string) => boolean,
+): string | null => {
+  const callee = stripParenExpression(callExpression.callee as EsTreeNode);
+  if (
+    !isNodeOfType(callee, "MemberExpression") ||
+    !isNodeOfType(callee.property, "Identifier") ||
+    callee.property.name !== "current"
+  ) {
+    return null;
+  }
+  const receiver = stripParenExpression(callee.object as EsTreeNode);
+  if (!isNodeOfType(receiver, "Identifier")) return null;
+  const binding = findVariableInitializer(callExpression, receiver.name);
+  if (!binding?.initializer || !isNodeOfType(binding.initializer, "CallExpression")) return null;
+  if (getCalleeName(binding.initializer) !== "useRef") return null;
+  const callbackArgument = binding.initializer.arguments?.[0];
+  if (!callbackArgument || !isNodeOfType(callbackArgument, "Identifier")) return null;
+  return isPropName(callbackArgument.name) ? callbackArgument.name : null;
+};
 
 // HACK: `useEffect(() => parentCallback(state.x), [state.x])` is the
 // "lift state up via callback" anti-pattern: the child owns state, then
@@ -44,21 +149,25 @@ export const noPropCallbackInEffect = defineRule({
           return;
         const depsNode = node.arguments[1];
         if (!isNodeOfType(depsNode, "ArrayExpression") || !depsNode.elements?.length) return;
+        const analysis = getProgramAnalysis(node);
 
         // Only flag if at least one dep is a non-prop (state-shape)
         // identifier — otherwise the effect is just adapting to prop
         // changes (legit pattern).
         const stateLikeDeps = (depsNode.elements ?? []).filter(
           (element) =>
-            isNodeOfType(element, "Identifier") && !propStackTracker.isPropName(element.name),
+            element &&
+            isStateLikeDependency(analysis, element as EsTreeNode, propStackTracker.isPropName),
         );
         if (stateLikeDeps.length === 0) return;
+
+        if (isRefLatchGuardedEffect(callback.body as EsTreeNode)) return;
+        if (hasPreviousValueDep(node, (depsNode.elements ?? []) as readonly EsTreeNode[])) return;
 
         // When every state-shape dep is driven by a timer / listener /
         // observer / subscription, the parent callback bridges an imperative
         // browser event, not a local state mirror — moving it into a Provider
         // wouldn't remove the effect.
-        const analysis = getProgramAnalysis(node);
         if (analysis) {
           const stateLikeDepRefs: Reference[] = [];
           for (const element of stateLikeDeps) {
@@ -82,9 +191,13 @@ export const noPropCallbackInEffect = defineRule({
         const reportedNodes = new Set<EsTreeNode>();
         walkInsideStatementBlocks(callback.body, (child: EsTreeNode) => {
           if (!isNodeOfType(child, "CallExpression")) return;
-          if (!isNodeOfType(child.callee, "Identifier")) return;
-          const calleeName = child.callee.name;
-          if (!propStackTracker.isPropName(calleeName)) return;
+          const directCallee = stripParenExpression(child.callee as EsTreeNode);
+          const calleeName =
+            (isNodeOfType(directCallee, "Identifier") &&
+              propStackTracker.isPropName(directCallee.name) &&
+              directCallee.name) ||
+            getRefHeldPropCallbackName(child, propStackTracker.isPropName);
+          if (!calleeName) return;
           // Only the "lift state up" hand-back fires: a discarded
           // `onChange(state)`. When the prop call's result flows somewhere
           // (`setError(validate(value))`) the prop is a pure transform consumed

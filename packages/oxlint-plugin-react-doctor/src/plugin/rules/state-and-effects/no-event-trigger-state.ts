@@ -13,11 +13,13 @@ import { buildLocalDependencyGraph } from "./utils/build-local-dependency-graph.
 import { collectRenderReachableNames } from "./utils/collect-render-reachable-names.js";
 import { expandTransitiveDependencies } from "./utils/expand-transitive-dependencies.js";
 import { collectFunctionLikeLocalNames } from "./utils/collect-function-like-local-names.js";
-import { collectHandlerBindingNames } from "./utils/collect-handler-binding-names.js";
-import { isInsideEventHandler } from "./utils/is-inside-event-handler.js";
 import { findTriggeredSideEffectCalleeName } from "./utils/find-triggered-side-effect-callee-name.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
+import { getRef } from "./utils/effect/ast.js";
+import { getProgramAnalysis } from "./utils/effect/get-program-analysis.js";
+import { isState } from "./utils/effect/react.js";
+import { isStateWrittenOnlyFromEventHandlers } from "./utils/is-state-written-only-from-event-handlers.js";
 
 // HACK: §6 of "You Might Not Need an Effect" — sending a POST request:
 //
@@ -87,32 +89,6 @@ const getTriggerGuardRootName = (testNode: EsTreeNode): string | null => {
   return null;
 };
 
-const collectHandlerOnlyWriteStateNames = (
-  componentBody: EsTreeNode,
-  useStateBindings: Array<{ valueName: string; setterName: string; declarator: EsTreeNode }>,
-  handlerBindingNames: Set<string>,
-): Set<string> => {
-  const handlerOnlyWriteStateNames = new Set<string>();
-  for (const binding of useStateBindings) {
-    let didFindAnySetterCall = false;
-    let areAllSetterCallsInHandlers = true;
-    walkAst(componentBody, (child: EsTreeNode) => {
-      if (!areAllSetterCallsInHandlers) return false;
-      if (!isNodeOfType(child, "CallExpression")) return;
-      if (!isNodeOfType(child.callee, "Identifier")) return;
-      if (child.callee.name !== binding.setterName) return;
-      didFindAnySetterCall = true;
-      if (!isInsideEventHandler(child, handlerBindingNames)) {
-        areAllSetterCallsInHandlers = false;
-      }
-    });
-    if (didFindAnySetterCall && areAllSetterCallsInHandlers) {
-      handlerOnlyWriteStateNames.add(binding.valueName);
-    }
-  }
-  return handlerOnlyWriteStateNames;
-};
-
 export const noEventTriggerState = defineRule({
   id: "no-event-trigger-state",
   title: "State exists only to trigger an effect",
@@ -126,14 +102,9 @@ export const noEventTriggerState = defineRule({
 
       const useStateBindings = collectUseStateBindings(componentBody);
       if (useStateBindings.length === 0) return;
-
-      const handlerBindingNames = collectHandlerBindingNames(componentBody);
-      const handlerOnlyWriteStateNames = collectHandlerOnlyWriteStateNames(
-        componentBody,
-        useStateBindings,
-        handlerBindingNames,
-      );
-      if (handlerOnlyWriteStateNames.size === 0) return;
+      const analysis = getProgramAnalysis(componentBody);
+      if (!analysis) return;
+      const localStateNames = new Set(useStateBindings.map((binding) => binding.valueName));
 
       // HACK: a state read in render (e.g. `<input value={query} />`)
       // is dual-purpose — it controls UI AND triggers the effect.
@@ -161,7 +132,15 @@ export const noEventTriggerState = defineRule({
 
         const depElement = depsNode.elements[0];
         if (!isNodeOfType(depElement, "Identifier")) return;
-        if (!handlerOnlyWriteStateNames.has(depElement.name)) return;
+        if (!localStateNames.has(depElement.name)) return;
+        const dependencyReference = getRef(analysis, depElement);
+        if (
+          !dependencyReference ||
+          !isState(analysis, dependencyReference) ||
+          !isStateWrittenOnlyFromEventHandlers(analysis, dependencyReference)
+        ) {
+          return;
+        }
         // Dual-purpose state — used in render too. Don't claim it
         // "exists only to schedule" the effect.
         if (renderReachableNames.has(depElement.name)) return;

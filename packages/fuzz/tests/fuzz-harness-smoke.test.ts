@@ -5,6 +5,8 @@ import { fuzzRule } from "../src/fuzz-rule.js";
 import { generateStructuredFuzzProgram } from "../src/generate-fuzz-program.js";
 import { loadFuzzCorpus } from "../src/load-fuzz-corpus.js";
 import { createSeededRandom } from "../src/seeded-random.js";
+import { buildAstEquivalentFuzzVariants } from "../src/ast-equivalent-fuzz-variants.js";
+import { buildVerdictPreservingVariants } from "../src/verdict-preserving-variants.js";
 import { runRule } from "../../oxlint-plugin-react-doctor/src/test-utils/run-rule.js";
 import type { Rule } from "../../oxlint-plugin-react-doctor/src/plugin/utils/rule.js";
 
@@ -34,10 +36,11 @@ describe("fuzz harness oracles", () => {
     expect(checkedCount).toBeGreaterThan(0);
   });
 
-  // The regression corpus holds confirmed false positives — valid programs
-  // by definition, so every seed must parse (a broken seed would silently
-  // stop exercising its weakness class).
-  it("loads a regression corpus whose every seed parses cleanly", () => {
+  // The corpus holds confirmed false positives (regressions/) and confirmed
+  // true positives (true-positives/) — every seed must parse (a broken seed
+  // would silently stop exercising its weakness class). Firing expectations
+  // live in each rule's unit suite, never here.
+  it("loads a corpus whose every seed parses cleanly", () => {
     const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
     const corpus = loadFuzzCorpus(path.join(packageRoot, "corpus"));
     expect(corpus.length).toBeGreaterThan(0);
@@ -63,6 +66,46 @@ describe("fuzz harness oracles", () => {
     expect(findings.some((finding) => finding.kind === "crash")).toBe(true);
   });
 
+  // Every verdict-preserving rewrite must itself parse — a variant that
+  // breaks the program would be filtered and silently stop applying
+  // mutation pressure. Checked over generated programs (JSX, hooks,
+  // module-scope sections) rather than one hand-written sample.
+  it("builds verdict-preserving variants that all parse cleanly", () => {
+    let variantCount = 0;
+    const labels = new Set<string>();
+    for (let seedValue = 1; seedValue <= 50; seedValue += 1) {
+      const { code } = generateStructuredFuzzProgram(createSeededRandom(seedValue));
+      for (const variant of buildVerdictPreservingVariants(code, "fixture.tsx")) {
+        variantCount += 1;
+        labels.add(variant.label);
+        const result = runRule(NOOP_RULE, variant.code, { forceJsx: true });
+        expect(
+          result.parseErrors,
+          `variant "${variant.label}" broke the program:\n${variant.code}`,
+        ).toEqual([]);
+      }
+    }
+    expect(variantCount).toBeGreaterThan(0);
+    expect(labels).toContain("parenthesized call receivers");
+    expect(labels).toContain("concise arrow bodies converted to block returns");
+    expect(labels).toContain("no-op prologue statement in every function body");
+  });
+
+  it("rewrites member calls into computed spelling in the advisory tier", () => {
+    const variants = buildVerdictPreservingVariants(
+      `export const App = () => { document.write("x"); return null; };`,
+      "fixture.tsx",
+    );
+    const computed = variants.find(
+      (variant) => variant.label === "computed-member call properties",
+    );
+    expect(computed?.code).toContain(`document["write"]("x")`);
+    expect(computed?.mustPreserveVerdict).toBe(false);
+    const castReceiver = variants.find((variant) => variant.label === "as-any call receivers");
+    expect(castReceiver?.code).toContain(`(document as any).write("x")`);
+    expect(castReceiver?.mustPreserveVerdict).toBe(true);
+  });
+
   it("catches a rule that keys off incidental source shape", () => {
     const commentSensitiveRule: Rule = {
       id: "fuzz-smoke-invariant",
@@ -79,5 +122,32 @@ describe("fuzz harness oracles", () => {
       checkInvariants: true,
     });
     expect(findings.some((finding) => finding.kind === "invariant-violation")).toBe(true);
+  });
+
+  it("extracts inline effect callbacks to exact const bindings", () => {
+    const variants = buildAstEquivalentFuzzVariants(
+      `const Widget = ({ url }) => {
+  useEffect(() => fetch(url), [url]);
+  React.useLayoutEffect(function measure() { readLayout(); }, []);
+  useInsertionEffect((() => track()) as () => void, []);
+  return null;
+};`,
+      "fixture.tsx",
+      true,
+    );
+    const aliasVariant = variants.find(
+      (variant) => variant.label === "inline effect callbacks extracted to const bindings",
+    );
+    expect(aliasVariant?.code).toContain(
+      "const __reactDoctorFuzzEffectCallback0 = () => fetch(url);",
+    );
+    expect(aliasVariant?.code).toContain("useEffect(__reactDoctorFuzzEffectCallback0, [url]);");
+    expect(aliasVariant?.code).toContain(
+      "React.useLayoutEffect(__reactDoctorFuzzEffectCallback1, []);",
+    );
+    expect(aliasVariant?.code).toContain(
+      "useInsertionEffect(__reactDoctorFuzzEffectCallback2, []);",
+    );
+    expect(runRule(NOOP_RULE, aliasVariant?.code ?? "").parseErrors).toEqual([]);
   });
 });

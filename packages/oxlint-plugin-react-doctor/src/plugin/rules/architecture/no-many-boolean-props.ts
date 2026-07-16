@@ -2,10 +2,11 @@ import { BOOLEAN_PROP_THRESHOLD } from "../../constants/thresholds.js";
 import { defineRule } from "../../utils/define-rule.js";
 import { functionContainsReactRenderOutput } from "../../utils/function-contains-react-render-output.js";
 import { isBooleanPrefixedPropName } from "../../utils/is-boolean-prefixed-prop-name.js";
-import { isComponentAssignment } from "../../utils/is-component-assignment.js";
 import { isComponentDeclaration } from "../../utils/is-component-declaration.js";
 import { isEventHandlerAttribute } from "../../utils/is-event-handler-attribute.js";
-import { isInlineFunctionExpression } from "../../utils/is-inline-function-expression.js";
+import { resolveFirstArgumentBinding } from "../../utils/resolve-first-argument-binding.js";
+import { isUppercaseName } from "../../utils/is-uppercase-name.js";
+import { unwrapReactHocFunction } from "../../utils/unwrap-react-hoc-function.js";
 import { walkAst } from "../../utils/walk-ast.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { RuleContext } from "../../utils/rule-context.js";
@@ -147,15 +148,17 @@ export const noManyBooleanProps = defineRule({
       reportNode: EsTreeNode,
     ): void => {
       if (!param) return;
+      const propsBinding = resolveFirstArgumentBinding(param);
+      if (!propsBinding) return;
       // The component gates (uppercase name) also match non-component
       // factories like `function CreateValidator(options) { … }`, whose
       // `options.isStrict` accesses look like boolean props. Require
       // actual render output before treating the param as component props.
-      if (!functionContainsReactRenderOutput(functionNode, context.scopes)) return;
-      if (isNodeOfType(param, "ObjectPattern")) {
+      if (!functionContainsReactRenderOutput(functionNode, context.scopes, context.cfg)) return;
+      if (isNodeOfType(propsBinding, "ObjectPattern")) {
         const callbackUsedNames = collectCallbackUsedNames(body, param, context.scopes);
         const booleanLikePropNames: string[] = [];
-        for (const property of param.properties ?? []) {
+        for (const property of propsBinding.properties ?? []) {
           if (!isNodeOfType(property, "Property")) continue;
           const keyName = isNodeOfType(property.key, "Identifier") ? property.key.name : null;
           if (!keyName) continue;
@@ -171,8 +174,8 @@ export const noManyBooleanProps = defineRule({
         reportIfMany(booleanLikePropNames, componentName, reportNode);
         return;
       }
-      if (isNodeOfType(param, "Identifier")) {
-        const accessed = collectBooleanLikePropsFromBody(body, param.name);
+      if (isNodeOfType(propsBinding, "Identifier")) {
+        const accessed = collectBooleanLikePropsFromBody(body, propsBinding.name);
         reportIfMany([...accessed], componentName, reportNode);
       }
     };
@@ -183,10 +186,16 @@ export const noManyBooleanProps = defineRule({
         checkComponent(node, node.params?.[0], node.body, node.id.name, node.id);
       },
       VariableDeclarator(node: EsTreeNodeOfType<"VariableDeclarator">) {
-        if (!isComponentAssignment(node)) return;
-        if (!isNodeOfType(node.id, "Identifier")) return;
-        if (!isInlineFunctionExpression(node.init)) return;
-        checkComponent(node.init, node.init.params?.[0], node.init.body, node.id.name, node.id);
+        if (!isNodeOfType(node.id, "Identifier") || !isUppercaseName(node.id.name)) return;
+        const functionNode = unwrapReactHocFunction(node.init);
+        if (!functionNode) return;
+        checkComponent(
+          functionNode,
+          functionNode.params?.[0],
+          functionNode.body,
+          node.id.name,
+          node.id,
+        );
       },
     };
   },

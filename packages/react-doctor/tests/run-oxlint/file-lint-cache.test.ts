@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import os from "node:os";
 import * as path from "node:path";
 import { afterAll, describe, expect, it } from "vite-plus/test";
-import type { Diagnostic } from "@react-doctor/core";
+import type { Diagnostic, RunOxlintFileCoverage } from "@react-doctor/core";
 import { buildDiagnosticIdentity, runOxlint } from "@react-doctor/core";
 import { buildTestProject, setupReactProject, writeFile } from "../regressions/_helpers.js";
 
@@ -18,15 +18,17 @@ afterAll(() => {
 const USER_CONFIG = {
   rules: {
     "react-doctor/no-barrel-import": "warn",
-    "react-doctor/no-array-index-key": "warn",
+    "react-doctor/no-array-index-as-key": "warn",
   },
 } as const;
 
-const BARREL_INDEX = "export { Button } from './Button';\n";
+const BARREL_INDEX = "export { Button } from './Button';\nexport { Card } from './Card';\n";
 const NON_BARREL_INDEX = "export const Button = () => null;\n";
+// The mapped list comes from a prop: `no-array-index-as-key` exempts
+// positionally-stable local literal arrays, so a dynamic source is needed
+// for the sanity assertions below.
 const APP_SOURCE = `import { Button } from "./components";
-export const App = () => {
-  const items = [1, 2, 3];
+export const App = ({ items }: { items: string[] }) => {
   return <ul>{items.map((value, index) => <li key={index}>{value}<Button /></li>)}</ul>;
 };
 `;
@@ -35,14 +37,17 @@ interface ScanOptions {
   perFileLintCacheEnabled?: boolean;
   respectInlineDisables?: boolean;
   hasReactCompiler?: boolean;
+  hasReactCompilerLintPlugin?: boolean;
   includePaths?: string[];
   onCacheStats?: (cacheHitFileCount: number, totalConsideredFileCount: number) => void;
+  onFileCoverage?: (coverage: RunOxlintFileCoverage) => void;
 }
 
 const setupFixture = (caseId: string, indexSource: string): string => {
   const projectDir = setupReactProject(tempRoot, caseId, {
     files: {
       "src/components/Button.tsx": "export const Button = () => null;\n",
+      "src/components/Card.tsx": "export const Card = () => null;\n",
       "src/components/index.ts": indexSource,
       "src/App.tsx": APP_SOURCE,
       "src/clean.tsx": "export const Clean = () => <div>ok</div>;\n",
@@ -61,12 +66,14 @@ const scan = (projectDir: string, options: ScanOptions = {}): Promise<Diagnostic
       rootDirectory: projectDir,
       framework: "nextjs",
       hasReactCompiler: options.hasReactCompiler ?? false,
+      hasReactCompilerLintPlugin: options.hasReactCompilerLintPlugin ?? false,
     }),
     userConfig: USER_CONFIG,
     includePaths: options.includePaths,
     respectInlineDisables: options.respectInlineDisables,
     perFileLintCacheEnabled: options.perFileLintCacheEnabled,
     onCacheStats: options.onCacheStats,
+    onFileCoverage: options.onFileCoverage,
   });
 
 // Deterministic serialization of a diagnostic set for byte-identical
@@ -97,7 +104,9 @@ describe("per-file lint cache", () => {
     expect(serialize(warm)).toBe(serialize(withCacheOff));
     // Sanity: the fixture actually produced diagnostics from both halves.
     expect(withCacheOff.some((diagnostic) => diagnostic.rule === "no-barrel-import")).toBe(true);
-    expect(withCacheOff.some((diagnostic) => diagnostic.rule === "no-array-index-key")).toBe(true);
+    expect(withCacheOff.some((diagnostic) => diagnostic.rule === "no-array-index-as-key")).toBe(
+      true,
+    );
   });
 
   it("reports zero hits cold and full hits warm via onCacheStats", async () => {
@@ -129,6 +138,24 @@ describe("per-file lint cache", () => {
     expect(warmTotal).toBe(coldTotal);
   });
 
+  it("reports complete structural coverage on cold and warm scans", async () => {
+    const projectDir = setupFixture("file-coverage", BARREL_INDEX);
+    const coverageSnapshots: RunOxlintFileCoverage[] = [];
+    const onFileCoverage = (coverage: RunOxlintFileCoverage): void => {
+      coverageSnapshots.push(coverage);
+    };
+
+    await scan(projectDir, { perFileLintCacheEnabled: true, onFileCoverage });
+    await scan(projectDir, { perFileLintCacheEnabled: true, onFileCoverage });
+
+    expect(coverageSnapshots).toHaveLength(2);
+    for (const coverage of coverageSnapshots) {
+      expect([...coverage.analyzedFiles].sort()).toEqual(
+        [...new Set(coverage.candidateFiles)].sort(),
+      );
+    }
+  });
+
   it("invalidates a file when its OWN content changes (content-addressed)", async () => {
     const projectDir = setupFixture("content-change", BARREL_INDEX);
     await scan(projectDir, { perFileLintCacheEnabled: true }); // populate
@@ -146,7 +173,7 @@ export const App = () => <div><Button /></div>;
     // The cacheable diagnostic is gone, and the cache-on result matches a
     // from-scratch scan of the edited tree.
     expect(serialize(afterEditCacheOn)).toBe(serialize(afterEditCacheOff));
-    expect(afterEditCacheOn.some((diagnostic) => diagnostic.rule === "no-array-index-key")).toBe(
+    expect(afterEditCacheOn.some((diagnostic) => diagnostic.rule === "no-array-index-as-key")).toBe(
       false,
     );
   });
@@ -171,20 +198,48 @@ export const App = () => <div><Button /></div>;
     expect(noBarrelHitsOnApp(afterDepChangeCacheOn)).toBe(0);
   });
 
-  it("bypasses the cache in audit mode (respectInlineDisables: false)", async () => {
-    const projectDir = setupFixture("audit-bypass", BARREL_INDEX);
-    let cacheStatsCalled = false;
-    const diagnostics = await scan(projectDir, {
+  it("uses the cache in audit mode, byte-identically (respectInlineDisables: false)", async () => {
+    // Audit mode neutralizes disable directives on disk BEFORE the content is
+    // hashed, so the per-file key reflects exactly what oxlint saw; the cache is
+    // used (not bypassed) and `respectInlineDisables` namespaces it away from
+    // default mode (see compute-ruleset-hash.test.ts). Cold populates with zero
+    // hits, a warm rescan replays every file, and both match a cache-off scan.
+    const projectDir = setupFixture("audit-cache", BARREL_INDEX);
+    let coldHits: number | null = null;
+    let coldTotal: number | null = null;
+    let warmHits: number | null = null;
+    let warmTotal: number | null = null;
+
+    const withCacheOff = await scan(projectDir, {
+      perFileLintCacheEnabled: false,
+      respectInlineDisables: false,
+    });
+    const cold = await scan(projectDir, {
       perFileLintCacheEnabled: true,
       respectInlineDisables: false,
-      onCacheStats: () => {
-        cacheStatsCalled = true;
+      onCacheStats: (hits, total) => {
+        coldHits = hits;
+        coldTotal = total;
       },
     });
-    // Audit mode mutates files in place, so the cache must be bypassed entirely
-    // (onCacheStats never fires) while diagnostics are still produced.
-    expect(cacheStatsCalled).toBe(false);
-    expect(diagnostics.some((diagnostic) => diagnostic.rule === "no-barrel-import")).toBe(true);
+    const warm = await scan(projectDir, {
+      perFileLintCacheEnabled: true,
+      respectInlineDisables: false,
+      onCacheStats: (hits, total) => {
+        warmHits = hits;
+        warmTotal = total;
+      },
+    });
+
+    // The cache runs (onCacheStats fires): cold is all misses, warm all hits.
+    expect(coldHits).toBe(0);
+    expect(coldTotal).toBeGreaterThan(0);
+    expect(warmHits).toBe(warmTotal);
+    expect(warmTotal).toBe(coldTotal);
+    // ...and the cached diagnostics are byte-identical to a from-scratch scan.
+    expect(serialize(cold)).toBe(serialize(withCacheOff));
+    expect(serialize(warm)).toBe(serialize(withCacheOff));
+    expect(withCacheOff.some((diagnostic) => diagnostic.rule === "no-barrel-import")).toBe(true);
   });
 
   it("dedupes the merged result when includePaths repeats a file (matches cache-off)", async () => {
@@ -216,6 +271,21 @@ export const App = () => <div><Button /></div>;
     });
     // react-hooks-js can fail to load mid-run; a zero-miss warm scan would never
     // re-trigger that, so React Compiler projects bypass the cache entirely.
+    expect(cacheStatsCalled).toBe(false);
+    expect(diagnostics.some((diagnostic) => diagnostic.rule === "no-barrel-import")).toBe(true);
+  });
+
+  it("bypasses the cache when only React Compiler compatibility lint is installed", async () => {
+    const projectDir = setupFixture("react-compiler-lint-bypass", BARREL_INDEX);
+    let cacheStatsCalled = false;
+    const diagnostics = await scan(projectDir, {
+      perFileLintCacheEnabled: true,
+      hasReactCompilerLintPlugin: true,
+      onCacheStats: () => {
+        cacheStatsCalled = true;
+      },
+    });
+
     expect(cacheStatsCalled).toBe(false);
     expect(diagnostics.some((diagnostic) => diagnostic.rule === "no-barrel-import")).toBe(true);
   });

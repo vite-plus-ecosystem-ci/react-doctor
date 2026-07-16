@@ -1,5 +1,84 @@
 # @react-doctor/language-server
 
+## 0.7.9
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @react-doctor/core@0.7.9
+
+## 0.7.8
+
+### Patch Changes
+
+- [#1257](https://github.com/millionco/react-doctor/pull/1257) [`e632f8a`](https://github.com/millionco/react-doctor/commit/e632f8a6c4d5a9ba1eddfb5a01d5dd0d109cce22) Thanks [@aidenybai](https://github.com/aidenybai)! - Give same-site diagnostics distinct deterministic occurrence IDs in JSON reports and editor actions.
+
+- Updated dependencies []:
+  - @react-doctor/core@0.7.8
+
+## 0.7.7
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @react-doctor/core@0.7.7
+
+## 0.7.6
+
+### Patch Changes
+
+- Updated dependencies [[`037bd56`](https://github.com/millionco/react-doctor/commit/037bd569eca61132deb581511d8893c05ee87bf6)]:
+  - @react-doctor/core@0.7.6
+
+## 0.7.5
+
+### Patch Changes
+
+- Updated dependencies [[`99ac4ff`](https://github.com/millionco/react-doctor/commit/99ac4ff842ea8819b4cfce2548bddf0f5b47e6df)]:
+  - @react-doctor/core@0.7.5
+
+## 0.7.4
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @react-doctor/core@0.7.4
+
+## 0.7.3
+
+### Patch Changes
+
+- Updated dependencies [[`08b768b`](https://github.com/millionco/react-doctor/commit/08b768bb4a7ce80927f7ad15bc3850a1f7585457)]:
+  - @react-doctor/core@0.7.3
+
+## 0.7.2
+
+### Patch Changes
+
+- Updated dependencies [[`9cb4149`](https://github.com/millionco/react-doctor/commit/9cb414905de7b360d728ca08d45167116a94ee90), [`d353dad`](https://github.com/millionco/react-doctor/commit/d353dadf988c52e3037dff52eec9cf8923145364), [`5d2f17f`](https://github.com/millionco/react-doctor/commit/5d2f17f71c9fb8e0d8d649da1b26de8f5cfe6c34), [`9cb4149`](https://github.com/millionco/react-doctor/commit/9cb414905de7b360d728ca08d45167116a94ee90), [`ce9dabf`](https://github.com/millionco/react-doctor/commit/ce9dabf1103f4f989bb8f9c1783a24674ba163e7)]:
+  - @react-doctor/core@0.7.2
+
+## 0.7.1
+
+### Patch Changes
+
+- Updated dependencies [[`c0c3fc1`](https://github.com/millionco/react-doctor/commit/c0c3fc170972876c8bbc2419b32e66b9c864df85)]:
+  - @react-doctor/core@0.7.1
+
+## 0.7.0
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @react-doctor/core@0.7.0
+
+## 0.6.3
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @react-doctor/core@0.6.3
+
 ## 0.6.2
 
 ### Patch Changes

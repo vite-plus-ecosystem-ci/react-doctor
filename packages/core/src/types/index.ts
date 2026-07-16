@@ -34,11 +34,16 @@ export type {
   InspectOptions,
   InspectResult,
   JsonReport,
+  JsonReportDiagnosticV3,
   JsonReportDiffInfo,
   JsonReportError,
   JsonReportMode,
   JsonReportProjectEntry,
+  JsonReportProjectEntryV3,
   JsonReportSummary,
+  JsonReportV1,
+  JsonReportV2,
+  JsonReportV3,
 } from "./inspect.js";
 export type {
   DependencyInfo,
@@ -54,7 +59,7 @@ export type { PromptMultiselectChoiceState, PromptMultiselectContext } from "./p
 // types barrel (including `discoverProject`) to load the entire
 // 286-rule plugin at module-init time. The project-discovery side
 // owns a tiny standalone copy in
-// `core/src/project-info/internal-rn-dependency-names.ts`;
+// `core/src/project-info/rn-metadata.ts`;
 // rule-side consumers import from the plugin package directly.
 // See that file for the duplication rationale.
 export type { ScoreResult, RulePriority, RuleTier } from "./score.js";

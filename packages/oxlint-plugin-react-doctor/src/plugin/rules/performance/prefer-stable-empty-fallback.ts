@@ -80,7 +80,7 @@ const buildMessage = (emptyKind: "array" | "object"): string => {
 };
 
 // React Compiler auto-memoises this allocation, so the rule is
-// `disabledBy: ["react-compiler"]` — it only fires on projects that
+// `disabledWhen: ["react-compiler"]` — it only fires on projects that
 // hand-write memoisation. Companion to `jsx-no-new-array-as-prop`,
 // which intentionally exempts the `x || []` shape; this rule fills
 // that gap when the right side is literally `[]` / `{}` AND the
@@ -98,7 +98,7 @@ export const preferStableEmptyFallback = defineRule({
   tags: ["react-jsx-only", "test-noise"],
   severity: "warn",
   category: "Performance",
-  disabledBy: ["react-compiler"],
+  disabledWhen: ["react-compiler"],
   recommendation:
     "Make a `const EMPTY = []` (or `{}`) at module scope and use it as the `||` / `??` fallback, so the value stays the same each render.",
   create: (context: RuleContext) => {
@@ -108,13 +108,13 @@ export const preferStableEmptyFallback = defineRule({
         memoRegistry = buildSameFileMemoRegistry(node as EsTreeNode);
       },
       JSXAttribute(node: EsTreeNodeOfType<"JSXAttribute">) {
-        if (!isInsideFunctionScope(node)) return;
-        if (isJsxAttributeOnIntrinsicHtmlElement(node)) return;
         if (!node.value) return;
         if (!isNodeOfType(node.value, "JSXExpressionContainer")) return;
         const innerExpression = node.value.expression;
         if (!innerExpression) return;
         if (innerExpression.type === "JSXEmptyExpression") return;
+        if (!isInsideFunctionScope(node)) return;
+        if (isJsxAttributeOnIntrinsicHtmlElement(node)) return;
 
         const parentJsxOpening = node.parent;
         const openingName =

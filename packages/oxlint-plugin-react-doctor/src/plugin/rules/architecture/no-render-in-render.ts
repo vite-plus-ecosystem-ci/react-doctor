@@ -1,88 +1,133 @@
 import { RENDER_FUNCTION_PATTERN } from "../../constants/react.js";
 import { defineRule } from "../../utils/define-rule.js";
-import { isComponentParameterSymbol } from "../../utils/is-component-parameter-symbol.js";
+import { executesDuringRender } from "../../utils/executes-during-render.js";
+import { isAstDescendant } from "../../utils/is-ast-descendant.js";
+import { isComponentFunction } from "../../utils/is-component-function.js";
+import { isEs5Component } from "../../utils/is-es5-component.js";
+import { isEs6Component } from "../../utils/is-es6-component.js";
+import { isFunctionLike } from "../../utils/is-function-like.js";
+import { isReactHookName } from "../../utils/is-react-hook-name.js";
+import { isUppercaseName } from "../../utils/is-uppercase-name.js";
+import { resolveExactLocalFunction } from "../../utils/resolve-exact-local-function.js";
+import { walkAst } from "../../utils/walk-ast.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
-import type { ScopeAnalysis, SymbolDescriptor } from "../../semantic/scope-analysis.js";
+import type { SymbolDescriptor } from "../../semantic/scope-analysis.js";
 
-// `({ renderItem }) => …` / `const { renderItem } = props` /
-// `const renderItem = props.renderItem`: the callee resolves to a COMPONENT
-// parameter or a name whose declaration roots in one (a render prop owned by
-// the parent). Its identity is the parent's, so calling it inline remounts
-// nothing — the same render-prop carve-out as the `props.renderX()` shape,
-// for the destructured and plain-alias spellings. A locally-declared
-// `renderRow` helper, or a parameter of an ordinary nested helper, still
-// carries the smell and stays flagged.
-const tracesToPropOrParameter = (
-  symbol: SymbolDescriptor | null,
-  scopes: ScopeAnalysis,
-  visitedSymbols: Set<SymbolDescriptor> = new Set(),
-): boolean => {
-  if (!symbol || visitedSymbols.has(symbol)) return false;
-  visitedSymbols.add(symbol);
-  if (isComponentParameterSymbol(symbol)) return true;
-  if (!isNodeOfType(symbol.declarationNode, "VariableDeclarator")) return false;
-  const source = symbol.initializer;
-  if (!source) return false;
-  return initializerRootsInProps(source, scopes, visitedSymbols);
-};
-
-// The initializer of a destructuring (`const { renderItem } = props.slots`)
-// or plain alias (`const renderItem = props.renderItem`) is parent-owned
-// when it roots in `props` / `this.props`, including the defaulted spellings
-// `props.renderItem ?? defaultRender` and
-// `cond ? props.renderItem : renderFallback` where an operand roots there.
-const initializerRootsInProps = (
-  node: EsTreeNode,
-  scopes: ScopeAnalysis,
-  visitedSymbols: Set<SymbolDescriptor> = new Set(),
-): boolean => {
-  if (isNodeOfType(node, "LogicalExpression")) {
-    return (
-      initializerRootsInProps(node.left, scopes, visitedSymbols) ||
-      initializerRootsInProps(node.right, scopes, visitedSymbols)
-    );
-  }
-  if (isNodeOfType(node, "ConditionalExpression")) {
-    return (
-      initializerRootsInProps(node.consequent, scopes, visitedSymbols) ||
-      initializerRootsInProps(node.alternate, scopes, visitedSymbols)
-    );
-  }
-  return rootsInProps(node, scopes, visitedSymbols);
-};
-
-// True when a member-expression chain bottoms out in a COMPONENT parameter
-// (`props.slots.header`, or `slots.header` where `slots` is a component
-// parameter), a `this.props` access (`this.props.slots`), or a local alias
-// whose declaration roots in one (`const slots = props.slots` then
-// `slots.renderItem()`). The root is resolved through scope, so a local
-// variable named `props` is NOT treated as the component's props bag. Also
-// gates the inline member-call receiver, so `props.slots.renderItem()` is
-// exempt for the same reason its destructured form
-// (`const { renderItem } = props.slots`) already is.
-const rootsInProps = (
-  node: EsTreeNode,
-  scopes: ScopeAnalysis,
-  visitedSymbols: Set<SymbolDescriptor> = new Set(),
-): boolean => {
-  let current: EsTreeNode = node;
-  while (isNodeOfType(current, "MemberExpression")) {
-    if (
-      isNodeOfType(current.object, "ThisExpression") &&
-      isNodeOfType(current.property, "Identifier") &&
-      current.property.name === "props"
-    ) {
-      return true;
-    }
-    current = current.object;
-  }
-  if (isNodeOfType(current, "Identifier")) {
-    return tracesToPropOrParameter(scopes.symbolFor(current), scopes, visitedSymbols);
+// A `render*` call inside JSX is only a problem when the helper carries
+// REACT-COMPONENT semantics — i.e. its execution reaches hooks. Such a helper
+// is a component in disguise: invoking it inline splices its hooks into
+// the caller's hook order, so a conditional call (or a changed call
+// count) corrupts hook state. A hook-free render helper is just a
+// function that returns JSX — calling it inline is byte-for-byte
+// equivalent to writing the JSX in place (no identity, state, or
+// memoization exists to lose), so it is NOT flagged. Hook-free class
+// method calls (`this.renderHeader()`) are exempt for the same reason —
+// but a class component's render() IS render context: a bare
+// hook-calling helper invoked there still inlines hooks into a class
+// render, which is always broken.
+const isInsideComponentContext = (node: EsTreeNode): boolean => {
+  let cursor: EsTreeNode | null | undefined = node.parent;
+  while (cursor) {
+    if (isFunctionLike(cursor) && isComponentFunction(cursor)) return true;
+    if (isEs5Component(cursor) || isEs6Component(cursor)) return true;
+    cursor = cursor.parent ?? null;
   }
   return false;
+};
+
+const getFunctionFromDeclaration = (node: EsTreeNode): EsTreeNode | null => {
+  if (isFunctionLike(node)) return node;
+  if (isNodeOfType(node, "VariableDeclarator") && node.init && isFunctionLike(node.init)) {
+    return node.init;
+  }
+  return null;
+};
+
+// React hooks are only ever called bare (`useState()`) or through a
+// PascalCase namespace (`React.useState()`) — the same shape
+// eslint-plugin-react-hooks accepts. Member calls on lowercase
+// instances (`i18n.use(...)`, `app.use(plugin)`) are library idioms,
+// not hooks.
+const isHookCallee = (callee: EsTreeNode): boolean => {
+  if (isNodeOfType(callee, "Identifier")) return isReactHookName(callee.name);
+  if (
+    isNodeOfType(callee, "MemberExpression") &&
+    !callee.computed &&
+    isNodeOfType(callee.object, "Identifier") &&
+    isUppercaseName(callee.object.name) &&
+    isNodeOfType(callee.property, "Identifier")
+  ) {
+    return isReactHookName(callee.property.name);
+  }
+  return false;
+};
+
+const containsReachableHookCall = (
+  functionNode: EsTreeNode,
+  rootFunction: EsTreeNode,
+  context: RuleContext,
+  visitedFunctions: Set<EsTreeNode>,
+): boolean => {
+  if (!isFunctionLike(functionNode) || visitedFunctions.has(functionNode)) return false;
+  visitedFunctions.add(functionNode);
+  let didFindReachableHook = false;
+  walkAst(functionNode.body, (child: EsTreeNode) => {
+    if (didFindReachableHook) return false;
+    if (isFunctionLike(child) && !executesDuringRender(child, context.scopes)) return false;
+    if (!isNodeOfType(child, "CallExpression") && !isNodeOfType(child, "NewExpression")) return;
+    if (isNodeOfType(child, "CallExpression")) {
+      if (isHookCallee(child.callee as EsTreeNode)) {
+        didFindReachableHook = true;
+        return false;
+      }
+      const calledFunction = resolveExactLocalFunction(child.callee, context.scopes);
+      if (
+        calledFunction &&
+        isAstDescendant(calledFunction, rootFunction) &&
+        containsReachableHookCall(calledFunction, rootFunction, context, visitedFunctions)
+      ) {
+        didFindReachableHook = true;
+        return false;
+      }
+    }
+    for (const callArgument of child.arguments ?? []) {
+      if (!executesDuringRender(callArgument, context.scopes)) continue;
+      const callbackFunction = resolveExactLocalFunction(callArgument, context.scopes);
+      if (
+        callbackFunction &&
+        isAstDescendant(callbackFunction, rootFunction) &&
+        containsReachableHookCall(callbackFunction, rootFunction, context, visitedFunctions)
+      ) {
+        didFindReachableHook = true;
+        return false;
+      }
+    }
+  });
+  return didFindReachableHook;
+};
+
+// Fires only when the callee resolves to a LOCAL function whose synchronous
+// execution reaches hooks. Everything unresolvable — render props, parameters,
+// aliases, member calls — is a plain callable with no hook state to
+// corrupt, so it stays silent.
+const isHookCallingRenderHelper = (
+  symbol: SymbolDescriptor | null,
+  context: RuleContext,
+): boolean => {
+  if (!symbol) return false;
+  const declaration = symbol.declarationNode;
+  if (
+    !isNodeOfType(declaration, "FunctionDeclaration") &&
+    !isNodeOfType(declaration, "VariableDeclarator")
+  ) {
+    return false;
+  }
+  const functionNode = getFunctionFromDeclaration(declaration);
+  if (!functionNode) return false;
+  return containsReachableHookCall(functionNode, functionNode, context, new Set());
 };
 
 export const noRenderInRender = defineRule({
@@ -91,31 +136,24 @@ export const noRenderInRender = defineRule({
   severity: "warn",
   tags: ["test-noise"],
   recommendation:
-    "Make it a named component so React preserves its identity and does not remount its state.",
+    "Make it a named component rendered as JSX so React can track it and preserve its state.",
   create: (context: RuleContext) => ({
     JSXExpressionContainer(node: EsTreeNodeOfType<"JSXExpressionContainer">) {
-      const expression = node.expression;
+      // `renderRow?.()` parses as ChainExpression(CallExpression) — the
+      // optional call splices hooks into the caller just the same.
+      const expression = isNodeOfType(node.expression, "ChainExpression")
+        ? node.expression.expression
+        : node.expression;
       if (!isNodeOfType(expression, "CallExpression")) return;
-
-      let calleeName: string | null = null;
-      if (isNodeOfType(expression.callee, "Identifier")) {
-        if (tracesToPropOrParameter(context.scopes.symbolFor(expression.callee), context.scopes)) {
-          return;
-        }
-        calleeName = expression.callee.name;
-      } else if (
-        isNodeOfType(expression.callee, "MemberExpression") &&
-        isNodeOfType(expression.callee.property, "Identifier")
-      ) {
-        if (rootsInProps(expression.callee.object, context.scopes)) return;
-        calleeName = expression.callee.property.name;
-      }
-
-      if (!calleeName || !RENDER_FUNCTION_PATTERN.test(calleeName)) return;
+      if (!isNodeOfType(expression.callee, "Identifier")) return;
+      const calleeName = expression.callee.name;
+      if (!RENDER_FUNCTION_PATTERN.test(calleeName)) return;
+      if (!isInsideComponentContext(node)) return;
+      if (!isHookCallingRenderHelper(context.scopes.symbolFor(expression.callee), context)) return;
 
       context.report({
         node: expression,
-        message: `Your users lose state because "${calleeName}()" builds UI from an inline call that React remounts, so pull it into its own component instead.`,
+        message: `"${calleeName}()" hides a component behind an inline call, so pull it into its own component and render it as JSX so React can track it.`,
       });
     },
   }),

@@ -145,6 +145,11 @@ const program = new Command()
     "--no-dead-code",
     "skip dead-code analysis (unused files / exports / dependencies, circular imports)",
   )
+  .option("--supply-chain", "enable the dependency supply-chain scan (default)")
+  .option(
+    "--no-supply-chain",
+    "skip the dependency supply-chain scan (Socket.dev dependency health checks)",
+  )
   .option("--verbose", "show every rule and per-file details (default shows top 3 rules)")
   .option(
     "--debug",
@@ -166,9 +171,13 @@ const program = new Command()
   )
   .option(
     "--scope <value>",
-    "how much to scan/report: full (default), files, changed (only new issues vs base), or lines (only changed lines)",
+    "how much supported JS/TS source to scan/report: full (default), files, changed (only new issues vs base), or lines (issues whose source spans touch changed lines)",
   )
   .option("--base <ref>", "base git ref for files/changed/lines scope (auto-detected when omitted)")
+  .option(
+    "--include-untracked",
+    "with --scope files/changed/lines, also scan ordinary untracked files (respects .gitignore)",
+  )
   .addOption(
     // Deprecated alias for `--scope` (warns at runtime). `--diff <base>` →
     // `--scope changed --base <base>`, `--diff false` → `--scope full`. Hidden

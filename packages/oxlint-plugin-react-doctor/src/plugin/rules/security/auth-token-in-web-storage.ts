@@ -1,8 +1,10 @@
 import { defineRule } from "../../utils/define-rule.js";
+import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { skipNonProductionFiles } from "../../utils/skip-non-production-files.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 
 const MESSAGE =
   "Storing an auth token in `localStorage`/`sessionStorage` exposes it to any XSS on the page: JavaScript can read web storage and exfiltrate the token. Keep tokens in an `HttpOnly`, `Secure`, `SameSite` cookie instead.";
@@ -27,16 +29,21 @@ const NON_AUTH_TOKEN_PATTERN =
   /csrf|xsrf|device|fcm|apns|push|design|tokeniz|syntax|css|theme|color/i;
 const STRONG_AUTH_KEY_PATTERN =
   /jwt|secret|password|passwd|credential|private[-_]?key|api[-_]?key|bearer|access[-_]?token|refresh[-_]?token|auth[-_]?token|id[-_]?token|session/i;
+const PRODUCT_API_KEY_RECORDS_PATTERN =
+  /(?:^|[._:-])(?:created|saved|integration|mailing)[-_]?api[-_]?keys$/i;
+const PRODUCT_API_KEY_COLLECTION_PATTERN = /[._:-](?:created|generated|saved)[-_]?api[-_]?keys$/i;
 
 const isAuthCredentialKey = (key: string): boolean => {
+  if (PRODUCT_API_KEY_RECORDS_PATTERN.test(key)) return false;
   if (!SENSITIVE_KEY_PATTERN.test(key)) return false;
+  if (PRODUCT_API_KEY_COLLECTION_PATTERN.test(key)) return false;
   if (NON_AUTH_TOKEN_PATTERN.test(key) && !STRONG_AUTH_KEY_PATTERN.test(key)) return false;
   return true;
 };
 
 // `localStorage` / `sessionStorage`, optionally reached through a global
 // (`window.localStorage`, `globalThis.sessionStorage`).
-const isWebStorageObject = (node: EsTreeNode): boolean => {
+const isDirectWebStorageObject = (node: EsTreeNode): boolean => {
   if (isNodeOfType(node, "Identifier")) return STORAGE_NAMES.has(node.name);
   if (
     isNodeOfType(node, "MemberExpression") &&
@@ -48,6 +55,33 @@ const isWebStorageObject = (node: EsTreeNode): boolean => {
     return STORAGE_NAMES.has(node.property.name);
   }
   return false;
+};
+
+// Also resolves one level of aliasing: `const storage = window.localStorage`
+// then `storage.setItem(...)` — the binding provably IS web storage.
+const isWebStorageObject = (node: EsTreeNode): boolean => {
+  if (isDirectWebStorageObject(node)) return true;
+  if (!isNodeOfType(node, "Identifier")) return false;
+  const binding = findVariableInitializer(node, node.name);
+  return binding?.initializer ? isDirectWebStorageObject(binding.initializer) : false;
+};
+
+// Static string value of a key expression: a string literal, a
+// substitution-free template literal (`` `accessToken` `` — equivalent to
+// a string literal), or an identifier whose same-file declaration
+// initializer is one of those (`const TOKEN_STORAGE_KEY = "auth_token"`).
+const resolveStaticKeyString = (node: EsTreeNode): string | null => {
+  if (isNodeOfType(node, "Literal") && typeof node.value === "string") return node.value;
+  if (isNodeOfType(node, "TemplateLiteral") && (node.expressions ?? []).length === 0) {
+    const cooked = (node.quasis ?? [])[0]?.value?.cooked;
+    return typeof cooked === "string" ? cooked : null;
+  }
+  if (isNodeOfType(node, "Identifier") && node.name !== "undefined") {
+    const binding = findVariableInitializer(node, node.name);
+    if (!binding?.initializer || isNodeOfType(binding.initializer, "Identifier")) return null;
+    return resolveStaticKeyString(binding.initializer);
+  }
+  return null;
 };
 
 // Static property name of a member access: `store.token` → "token",
@@ -77,16 +111,11 @@ export const authTokenInWebStorage = defineRule({
       if (!isNodeOfType(callee, "MemberExpression") || callee.computed) return;
       if (!isNodeOfType(callee.property, "Identifier") || callee.property.name !== "setItem")
         return;
-      if (!isWebStorageObject(callee.object)) return;
+      if (!isWebStorageObject(stripParenExpression(callee.object))) return;
       const keyArgument = node.arguments?.[0];
-      if (
-        !keyArgument ||
-        !isNodeOfType(keyArgument, "Literal") ||
-        typeof keyArgument.value !== "string"
-      ) {
-        return;
-      }
-      if (!isAuthCredentialKey(keyArgument.value)) return;
+      if (!keyArgument) return;
+      const keyString = resolveStaticKeyString(keyArgument);
+      if (keyString === null || !isAuthCredentialKey(keyString)) return;
       context.report({ node, message: MESSAGE });
     },
     // `localStorage.authToken = t` / `localStorage["jwt"] = t`

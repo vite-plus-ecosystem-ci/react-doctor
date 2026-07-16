@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { parseSync } from "oxc-parser";
 import { CROSS_FILE_PARSE_MAX_BYTES } from "../constants/thresholds.js";
 import { attachParentReferences } from "./attach-parent-references.js";
+import { recordContentProbe } from "./cross-file-probe-recorder.js";
 import type { EsTreeNode } from "./es-tree-node.js";
 
 const FILENAME_TO_LANG: Record<string, "ts" | "tsx" | "js" | "jsx"> = {
@@ -16,7 +17,9 @@ const FILENAME_TO_LANG: Record<string, "ts" | "tsx" | "js" | "jsx"> = {
   ".cts": "ts",
 };
 
-const resolveLang = (filename: string): "ts" | "tsx" | "js" | "jsx" => {
+// Exported so the cross-file dependency collectors parse a file with the
+// SAME language selection as the rules' own cross-file parses.
+export const resolveLang = (filename: string): "ts" | "tsx" | "js" | "jsx" => {
   const extension = path.extname(filename).toLowerCase();
   return FILENAME_TO_LANG[extension] ?? "tsx";
 };
@@ -27,7 +30,17 @@ interface CacheEntry {
   readonly program: EsTreeNode | null;
 }
 
-export const parseSourceText = (filename: string, sourceText: string): EsTreeNode | null => {
+export interface ParseSourceTextInput {
+  readonly filename: string;
+  readonly sourceText: string;
+  readonly shouldAttachParentReferences?: boolean;
+}
+
+export const parseSourceText = ({
+  filename,
+  sourceText,
+  shouldAttachParentReferences = true,
+}: ParseSourceTextInput): EsTreeNode | null => {
   try {
     const result = parseSync(filename, sourceText, {
       astType: "ts",
@@ -36,7 +49,7 @@ export const parseSourceText = (filename: string, sourceText: string): EsTreeNod
     const hasFatalError = result.errors.some((parseError) => parseError.severity === "Error");
     if (hasFatalError) return null;
     const parsedProgram = result.program as unknown as EsTreeNode;
-    attachParentReferences(parsedProgram);
+    if (shouldAttachParentReferences) attachParentReferences(parsedProgram);
     return parsedProgram;
   } catch {
     return null;
@@ -59,6 +72,17 @@ const parseCache = new Map<string, CacheEntry>();
 // Node process, which matches the way oxlint runs a single batch
 // of files per process.
 export const parseSourceFile = (absoluteFilePath: string): EsTreeNode | null => {
+  // Declaration files are constant-null regardless of the filesystem (absent,
+  // present, any size — every branch below lands on `null`), so they are not
+  // a dependency and record no probe. Everything else records its content
+  // probe BEFORE the cache lookup — the parse is a pure function of this one
+  // file's content (see cross-file-probe-recorder.ts).
+  const isDeclarationFile =
+    absoluteFilePath.endsWith(".d.ts") ||
+    absoluteFilePath.endsWith(".d.mts") ||
+    absoluteFilePath.endsWith(".d.cts");
+  if (!isDeclarationFile) recordContentProbe(absoluteFilePath);
+
   let fileStat: fs.Stats;
   try {
     fileStat = fs.statSync(absoluteFilePath);
@@ -103,7 +127,10 @@ export const parseSourceFile = (absoluteFilePath: string): EsTreeNode | null => 
     return null;
   }
 
-  const parsedProgram = parseSourceText(absoluteFilePath, sourceText);
+  const parsedProgram = parseSourceText({
+    filename: absoluteFilePath,
+    sourceText,
+  });
 
   parseCache.set(absoluteFilePath, {
     mtimeMs: fileStat.mtimeMs,

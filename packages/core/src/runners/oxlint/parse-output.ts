@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
 import reactDoctorPlugin from "oxlint-plugin-react-doctor";
 import type {
@@ -7,14 +8,19 @@ import type {
   OxlintOutput,
   ProjectInfo,
 } from "../../types/index.js";
-import { ERROR_PREVIEW_LENGTH_CHARS } from "../../constants.js";
+import { ERROR_PREVIEW_LENGTH_CHARS, OCCURRENCE_MATCHED_CATEGORIES } from "../../constants.js";
+import { findJsxOpenerSpan } from "../../find-jsx-opener-span.js";
 import { isLintableSourceFile } from "../../utils/is-lintable-source-file.js";
+import { isRecord } from "../../utils/is-record.js";
 import { isMinifiedSource } from "../../utils/is-minified-source.js";
+import { lineOfUtf8Offset } from "../../utils/line-of-utf8-offset.js";
 import { OxlintOutputUnparseable, ReactDoctorError } from "../../errors.js";
-import { buildNoSecretsRecommendation } from "../../utils/build-no-secrets-recommendation.js";
+import { getCapabilities } from "../../project-info/capabilities.js";
 import { appendReanimatedSharedValueHint } from "../../utils/append-reanimated-shared-value-hint.js";
 import { redactSensitiveText } from "../../utils/redact-sensitive-text.js";
 import { shouldSuppressLocalUseHookDiagnostic } from "./should-suppress-local-use-hook-diagnostic.js";
+import { shouldSuppressCompilerFindingInWorklet } from "./should-suppress-compiler-finding-in-worklet.js";
+import { suppressMemoizationInBailedOutFunctions } from "./suppress-memoization-in-bailed-out-functions.js";
 
 const FILEPATH_WITH_LOCATION_PATTERN = /\S+\.\w+:\d+:\d+[\s\S]*$/;
 const LEADING_SEVERITY_LABEL_PATTERN = /^(?:Error|Warning):\s*/;
@@ -31,6 +37,9 @@ const REACT_COMPILER_TITLE = "React Compiler can't optimize this";
 // an unsupported-syntax bail-out, not an optimization miss in the
 // user's code, so it gets its own headline.
 const REACT_COMPILER_TODO_TITLE = "React Compiler doesn't support this syntax";
+const REACT_ERROR_BOUNDARY_TITLE = "JSX render errors need an Error Boundary";
+const REACT_ERROR_BOUNDARY_MESSAGE =
+  "This try/catch cannot catch errors thrown while the JSX child renders. Use an Error Boundary instead.";
 const REACT_COMPILER_IMPACT =
   "This component misses React Compiler's automatic memoization & re-renders more than it should";
 const REACT_COMPILER_ACTION = "Rewrite the flagged code so the compiler can optimize it.";
@@ -87,15 +96,21 @@ const PLUGIN_CATEGORY_MAP: Record<string, string> = {
 const lookupOwnString = (record: Record<string, string>, key: string): string | undefined =>
   Object.hasOwn(record, key) ? record[key] : undefined;
 
+// A rule with a `recommendationFor` picks its own prose from the project's
+// capability set (e.g. the static-export redirect advice, the per-framework
+// public-env prefix); everything else renders the static `recommendation`.
+// Core carries no rule-specific prose or rule-name matches here.
 const getRuleRecommendation = (ruleName: string, project: ProjectInfo): string | undefined => {
-  if (ruleName === "no-secrets-in-client-code") {
-    return buildNoSecretsRecommendation(
-      project,
-      reactDoctorPlugin.rules["no-secrets-in-client-code"]?.recommendation ??
-        "Move secrets to server-only code",
+  const rule = reactDoctorPlugin.rules[ruleName];
+  if (!rule) return undefined;
+  if (rule.recommendationFor) {
+    const capabilities = getCapabilities(project);
+    const conditionalRecommendation = rule.recommendationFor((capability) =>
+      capabilities.has(capability),
     );
+    if (conditionalRecommendation !== undefined) return conditionalRecommendation;
   }
-  return reactDoctorPlugin.rules[ruleName]?.recommendation;
+  return rule.recommendation;
 };
 
 // Same shape as `getRuleRecommendation`, but for the diagnostic category
@@ -115,6 +130,7 @@ const getRuleTitle = (ruleName: string): string | undefined =>
 // diagnostics get a fixed human headline instead of their bare id.
 const resolveDiagnosticTitle = (plugin: string, rule: string): string | undefined => {
   if (plugin !== "react-hooks-js") return getRuleTitle(rule);
+  if (rule === "error-boundaries") return REACT_ERROR_BOUNDARY_TITLE;
   return rule === "todo" ? REACT_COMPILER_TODO_TITLE : REACT_COMPILER_TITLE;
 };
 
@@ -175,6 +191,12 @@ const resolveCleanedDiagnostic = (
     // and only the elaboration stays in `help`.
     const [reasonSummary = "", ...reasonDetailLines] = bailoutReason.split("\n");
     const reasonDetail = reasonDetailLines.join("\n").trim();
+    if (rule === "error-boundaries") {
+      return {
+        message: REACT_ERROR_BOUNDARY_MESSAGE,
+        help: reasonDetail || help,
+      };
+    }
     return {
       message: buildReactCompilerMessage(
         reasonSummary.trim(),
@@ -198,8 +220,21 @@ const parseRuleCode = (code: string): { plugin: string; rule: string } => {
   return { plugin: match[1].replace(/^eslint-plugin-/, ""), rule: match[2] };
 };
 
-const resolveDiagnosticCategory = (plugin: string, rule: string): string =>
-  getRuleCategory(rule) ?? lookupOwnString(PLUGIN_CATEGORY_MAP, plugin) ?? "Bugs";
+const resolveDiagnosticCategory = (plugin: string, rule: string): string => {
+  if (plugin === "react-hooks-js" && rule === "error-boundaries") return "Bugs";
+  return getRuleCategory(rule) ?? lookupOwnString(PLUGIN_CATEGORY_MAP, plugin) ?? "Bugs";
+};
+
+// Whether the finding's identity is the flagged element rather than the
+// flagged line's text, so `computeDiagnosticDelta` matches it by
+// `(file, rule)` occurrence count. Resolved here — the one place that
+// already consults rule metadata — so the delta stays a pure function of
+// its `Diagnostic` inputs. Every Accessibility-category finding qualifies
+// (element-level by nature, including adopted third-party a11y rules);
+// rules in other categories opt in via their `matchByOccurrence` flag.
+const resolveMatchByOccurrence = (rule: string, category: string): boolean =>
+  OCCURRENCE_MATCHED_CATEGORIES.has(category) ||
+  Boolean(reactDoctorPlugin.rules[rule]?.matchByOccurrence);
 
 /**
  * Maps oxlint's non-primary labels (`labels[1..]`) into related source
@@ -229,11 +264,35 @@ const buildRelatedLocations = (
   return related;
 };
 
-const isOxlintOutput = (value: unknown): value is OxlintOutput => {
-  if (typeof value !== "object" || value === null) return false;
-  const candidate = value as { diagnostics?: unknown };
-  return Array.isArray(candidate.diagnostics);
-};
+const isOxlintSpan = (value: unknown): boolean =>
+  isRecord(value) &&
+  typeof value.offset === "number" &&
+  typeof value.length === "number" &&
+  typeof value.line === "number" &&
+  typeof value.column === "number";
+
+const isOxlintLabel = (value: unknown): boolean => isRecord(value) && isOxlintSpan(value.span);
+
+const isMappableOxlintDiagnostic = (value: unknown): boolean =>
+  isRecord(value) &&
+  typeof value.code === "string" &&
+  value.code.length > 0 &&
+  typeof value.filename === "string" &&
+  value.filename.length > 0 &&
+  (value.severity === "warning" || value.severity === "error") &&
+  Array.isArray(value.labels) &&
+  value.labels.every(isOxlintLabel);
+
+// oxlint attributes every routine diagnostic — including code-less parse
+// errors and unused-directive warnings — to a file. A diagnostic without a
+// filename is the engine reporting its own failure (e.g. "Error running JS
+// plugin." from a throwing configured plugin), which means the lint results
+// are incomplete and a clean report would be a false clean.
+const isEngineFailureDiagnostic = (value: unknown): boolean =>
+  !isRecord(value) || typeof value.filename !== "string" || value.filename.length === 0;
+
+const isOxlintOutput = (value: unknown): value is OxlintOutput =>
+  isRecord(value) && Array.isArray(value.diagnostics);
 
 /**
  * Parses one oxlint subprocess's stdout into a flat `Diagnostic[]`.
@@ -275,6 +334,15 @@ export const parseOxlintOutput = (
     });
   }
 
+  const engineFailureDiagnostic = parsed.diagnostics.find(isEngineFailureDiagnostic);
+  if (engineFailureDiagnostic !== undefined) {
+    throw new ReactDoctorError({
+      reason: new OxlintOutputUnparseable({
+        preview: JSON.stringify(engineFailureDiagnostic).slice(0, ERROR_PREVIEW_LENGTH_CHARS),
+      }),
+    });
+  }
+
   // HACK: oxlint reports diagnostics for every JS/TS extension it
   // scanned (`.ts`, `.tsx`, `.js`, `.jsx`, `.mts`, `.mjs`). The previous filter only
   // kept `.tsx` / `.jsx` — fine when react-doctor's curated rules were
@@ -292,10 +360,34 @@ export const parseOxlintOutput = (
   // bypassing whole-tree discovery) or when they're too small for the
   // discovery-time size gate. Cached so each file is read at most once.
   const minifiedFileCache = new Map<string, boolean>();
+  const sourceBufferCache = new Map<string, Buffer | null>();
+  const sourceLinesCache = new Map<string, string[] | null>();
+  const resolveAbsolutePath = (filename: string): string =>
+    path.isAbsolute(filename) ? filename : path.resolve(rootDirectory || ".", filename);
+  const readSourceBuffer = (filename: string): Buffer | null => {
+    const absolutePath = resolveAbsolutePath(filename);
+    const cached = sourceBufferCache.get(absolutePath);
+    if (cached !== undefined) return cached;
+    let sourceBuffer: Buffer | null;
+    try {
+      sourceBuffer = fs.readFileSync(absolutePath);
+    } catch {
+      sourceBuffer = null;
+    }
+    sourceBufferCache.set(absolutePath, sourceBuffer);
+    return sourceBuffer;
+  };
+  const readSourceLines = (filename: string): string[] | null => {
+    const absolutePath = resolveAbsolutePath(filename);
+    const cached = sourceLinesCache.get(absolutePath);
+    if (cached !== undefined) return cached;
+    const sourceBuffer = readSourceBuffer(filename);
+    const sourceLines = sourceBuffer ? sourceBuffer.toString("utf8").split("\n") : null;
+    sourceLinesCache.set(absolutePath, sourceLines);
+    return sourceLines;
+  };
   const isMinifiedDiagnosticFile = (filename: string): boolean => {
-    const absolutePath = path.isAbsolute(filename)
-      ? filename
-      : path.resolve(rootDirectory || ".", filename);
+    const absolutePath = resolveAbsolutePath(filename);
     const cached = minifiedFileCache.get(absolutePath);
     if (cached !== undefined) return cached;
     const minified = isMinifiedSource(absolutePath);
@@ -303,13 +395,14 @@ export const parseOxlintOutput = (
     return minified;
   };
 
-  return parsed.diagnostics
+  const mappedDiagnostics = parsed.diagnostics
     .filter(
       (diagnostic) =>
-        diagnostic.code &&
+        isMappableOxlintDiagnostic(diagnostic) &&
         isLintableSourceFile(diagnostic.filename) &&
         !isMinifiedDiagnosticFile(diagnostic.filename) &&
-        !shouldSuppressLocalUseHookDiagnostic(diagnostic, rootDirectory),
+        !shouldSuppressLocalUseHookDiagnostic(diagnostic, rootDirectory) &&
+        !shouldSuppressCompilerFindingInWorklet(diagnostic, project, rootDirectory),
     )
     .map((diagnostic) => {
       const { plugin, rule } = parseRuleCode(diagnostic.code);
@@ -327,7 +420,29 @@ export const parseOxlintOutput = (
       // in-memory document. `line` / `column` stay the source of truth
       // for everything else; offset / length are additive.
       const primarySpan = primaryLabel?.span;
+      const sourceBuffer = primarySpan ? readSourceBuffer(diagnostic.filename) : null;
       const relatedLocations = buildRelatedLocations(diagnostic.labels, normalizedFilePath);
+      const category = resolveDiagnosticCategory(plugin, rule);
+      const matchByOccurrence = resolveMatchByOccurrence(rule, category);
+      const sourceLines = primarySpan ? readSourceLines(diagnostic.filename) : null;
+      const primaryLineIndex = primarySpan ? primarySpan.line - 1 : -1;
+      const primaryLine = sourceLines?.[primaryLineIndex];
+      const primaryColumnIndex = primarySpan ? primarySpan.column - 1 : -1;
+      const isJsxTagLabel =
+        primaryLine !== undefined &&
+        primaryColumnIndex >= 0 &&
+        (primaryLine[primaryColumnIndex] === "<" || primaryLine[primaryColumnIndex - 1] === "<");
+      const jsxOpenerEndLineIndex =
+        sourceLines && isJsxTagLabel ? findJsxOpenerSpan(sourceLines, primaryLineIndex) : null;
+      const primarySpanEndLine =
+        jsxOpenerEndLineIndex !== null
+          ? jsxOpenerEndLineIndex + 1
+          : primarySpan && sourceBuffer
+            ? lineOfUtf8Offset(
+                sourceBuffer,
+                primarySpan.offset + Math.max(primarySpan.length - 1, 0),
+              )
+            : undefined;
       return {
         filePath: normalizedFilePath,
         plugin,
@@ -339,9 +454,26 @@ export const parseOxlintOutput = (
         url: diagnostic.url,
         line: primarySpan?.line ?? 0,
         column: primarySpan?.column ?? 0,
-        ...(primarySpan ? { offset: primarySpan.offset, length: primarySpan.length } : {}),
-        category: resolveDiagnosticCategory(plugin, rule),
+        ...(primarySpan
+          ? {
+              offset: primarySpan.offset,
+              length: primarySpan.length,
+              ...(primarySpanEndLine !== undefined ? { endLine: primarySpanEndLine } : {}),
+            }
+          : {}),
+        category,
+        ...(matchByOccurrence ? { matchByOccurrence: true } : {}),
         ...(relatedLocations.length > 0 ? { relatedLocations } : {}),
       };
     });
+  // This suppression is only sound under two invariants:
+  //   1. The `react-hooks-js` bail-out diagnostics and the
+  //      `react-compiler-no-manual-memoization` diagnostics for a file
+  //      always arrive in the SAME parseOxlintOutput batch — the
+  //      suppression can't see a bail-out reported in another batch.
+  //   2. `run-oxlint.ts` disables the per-file lint cache when
+  //      `project.hasReactCompiler` is true (see `useFileLintCache`), so
+  //      cached, unsuppressed memoization diagnostics can never replay
+  //      around this call.
+  return suppressMemoizationInBailedOutFunctions(mappedDiagnostics, rootDirectory);
 };

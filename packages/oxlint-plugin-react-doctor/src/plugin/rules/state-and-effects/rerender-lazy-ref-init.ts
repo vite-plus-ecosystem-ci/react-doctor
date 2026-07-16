@@ -4,7 +4,9 @@ import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { isHookCall } from "../../utils/is-hook-call.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { isReactHookName } from "../../utils/is-react-hook-name.js";
+import { isTrivialBuiltInConstruction } from "../../utils/is-trivial-built-in-construction.js";
 import type { RuleContext } from "../../utils/rule-context.js";
+import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 
 // Sister rule to `rerender-lazy-state-init`. `useRef` is even less
 // forgiving than `useState`: it does NOT accept a lazy initializer
@@ -23,9 +25,14 @@ import type { RuleContext } from "../../utils/rule-context.js";
 //   - `useRef(new Callee())`     — `new` expression (the class case)
 //
 // Both allocate fresh per render and lose the allocation immediately
-// after the first render. The `new AbortController()` / `new Map()` /
-// `new Set()` patterns are the most common production occurrences of
-// this bug and are exactly what the rule should catch.
+// after the first render — but only EXPENSIVE construction is worth the
+// lazy-init ceremony. Zero-argument empty-container built-ins
+// (`new Set()`, `new Map()`, `new AbortController()`, …) cost about as
+// much as the trivial coercion helpers, so recommending the null-check
+// pattern for them is net-negative; they're exempt via
+// `isTrivialBuiltInConstruction` (shared with `rerender-lazy-state-init`).
+// Runtime arguments (`new Set(items)` iterates its input every render)
+// and member-expression callees (`new ns.Map()`) still fire.
 //
 // LIMITATIONS:
 //   - Doesn't try to follow identifier bindings (`const init = expensiveCall();
@@ -44,7 +51,7 @@ export const rerenderLazyRefInit = defineRule({
   create: (context: RuleContext) => ({
     CallExpression(node: EsTreeNodeOfType<"CallExpression">) {
       if (!isHookCall(node, "useRef") || !node.arguments?.length) return;
-      const initializer = node.arguments[0];
+      const initializer = stripParenExpression(node.arguments[0]);
 
       const isPlainCall = isNodeOfType(initializer, "CallExpression");
       const isNewCall = isNodeOfType(initializer, "NewExpression");
@@ -62,6 +69,7 @@ export const rerenderLazyRefInit = defineRule({
         : (memberPropertyName ?? "fn");
 
       if (TRIVIAL_INITIALIZER_NAMES.has(calleeName)) return;
+      if (isTrivialBuiltInConstruction(initializer)) return;
 
       // `useRef(useId())` / `useRef(useContext(Ctx))` captures another
       // hook's value. The result is already stable per the rules of

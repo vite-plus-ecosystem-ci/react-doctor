@@ -9,15 +9,24 @@ import {
   MAX_NOISE_MUTATIONS,
   NOISE_MUTATION_PROBABILITY,
   SLOW_RULE_THRESHOLD_MS,
+  SLOW_VERIFY_RERUN_COUNT,
 } from "./constants.js";
+import { buildAstEquivalentFuzzVariants } from "./ast-equivalent-fuzz-variants.js";
 import { buildEquivalentFuzzVariants } from "./equivalent-fuzz-variants.js";
+import { buildVerdictPreservingVariants } from "./verdict-preserving-variants.js";
 import { generateStructuredFuzzProgram } from "./generate-fuzz-program.js";
 import type { FuzzCorpusEntry } from "./load-fuzz-corpus.js";
 import { crossoverFuzzPrograms, mutateFuzzProgram } from "./mutate-fuzz-program.js";
 import { createSeededRandom } from "./seeded-random.js";
 import { FUZZ_FILENAME_POOL } from "./snippet-pools.js";
 
-export type FuzzFindingKind = "crash" | "slow" | "invariant-violation";
+const EFFECT_CALLBACK_ALIAS_RULE_IDS = new Set([
+  "no-cascading-set-state",
+  "no-effect-chain",
+  "no-fetch-in-effect",
+]);
+
+export type FuzzFindingKind = "crash" | "slow" | "invariant-violation" | "verdict-drop";
 
 export interface FuzzFinding {
   ruleId: string;
@@ -147,15 +156,27 @@ export const fuzzRuleWithStats = (
     }
     if ((outcome.diagnosticSignature?.length ?? 0) > 0) stats.firedProgramCount += 1;
     if (outcome.elapsedMs > slowThresholdMs) {
-      findings.push({
-        ruleId,
-        kind: "slow",
-        seed: iterationSeed,
-        iteration,
-        detail: `took ${Math.round(outcome.elapsedMs)}ms (threshold ${slowThresholdMs}ms)`,
-        code,
-        variantLabel,
-      });
+      // Wall-clock spikes from CPU contention (parallel test runs, CI
+      // neighbors) masquerade as pathological rules. Re-run the exact
+      // program and keep the fastest time — a genuinely slow input stays
+      // slow on every run, while a descheduled one drops to milliseconds.
+      let fastestElapsedMs = outcome.elapsedMs;
+      for (let retry = 0; retry < SLOW_VERIFY_RERUN_COUNT; retry += 1) {
+        const rerun = runRuleOnCode(rule, code, filename);
+        if (rerun.elapsedMs < fastestElapsedMs) fastestElapsedMs = rerun.elapsedMs;
+        if (fastestElapsedMs <= slowThresholdMs) break;
+      }
+      if (fastestElapsedMs > slowThresholdMs) {
+        findings.push({
+          ruleId,
+          kind: "slow",
+          seed: iterationSeed,
+          iteration,
+          detail: `took ${Math.round(fastestElapsedMs)}ms verified across reruns (threshold ${slowThresholdMs}ms)`,
+          code,
+          variantLabel,
+        });
+      }
     }
     return outcome;
   };
@@ -205,7 +226,48 @@ export const fuzzRuleWithStats = (
     }
 
     if (!options.checkInvariants || isScanRule || didApplyNoise) continue;
-    for (const variant of buildEquivalentFuzzVariants(code, sections)) {
+
+    // Verdict-preserving mutation oracle ("x + 1 = 2" → "x + 1 + 1 - 1 = 2"):
+    // when the rule FIRED, semantics-preserving shape rewrites (extra
+    // parens, cast wrappers, concise→block arrows, no-op prologues) must
+    // not silence it entirely — a drop means detection keys on incidental
+    // token shape, the classic false-negative evasion class. Signature
+    // CHANGES are expected here (messages may embed source text), so only
+    // full disappearance is a finding.
+    if (didFire) {
+      for (const variant of buildVerdictPreservingVariants(code, filename)) {
+        if (!variant.mustPreserveVerdict) continue;
+        const variantOutcome = runRuleOnCode(rule, variant.code, filename);
+        if (variantOutcome.crashDetail !== undefined) {
+          findings.push({
+            ruleId,
+            kind: "crash",
+            seed: iterationSeed,
+            iteration,
+            detail: variantOutcome.crashDetail,
+            code: variant.code,
+            variantLabel: variant.label,
+          });
+          continue;
+        }
+        if ((variantOutcome.diagnosticSignature?.length ?? 0) === 0) {
+          findings.push({
+            ruleId,
+            kind: "verdict-drop",
+            seed: iterationSeed,
+            iteration,
+            detail: `diagnostics disappeared under verdict-preserving rewrite "${variant.label}" (base had ${outcome.diagnosticSignature?.length ?? 0})`,
+            code: variant.code,
+            variantLabel: variant.label,
+          });
+        }
+      }
+    }
+
+    for (const variant of [
+      ...buildEquivalentFuzzVariants(code, sections),
+      ...buildAstEquivalentFuzzVariants(code, filename, EFFECT_CALLBACK_ALIAS_RULE_IDS.has(ruleId)),
+    ]) {
       if (hasParseErrors(variant.code, filename)) continue;
       const variantOutcome = runRuleOnCode(rule, variant.code, filename);
       if (variantOutcome.crashDetail !== undefined) {

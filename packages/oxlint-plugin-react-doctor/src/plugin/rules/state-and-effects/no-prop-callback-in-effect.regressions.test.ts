@@ -99,6 +99,82 @@ describe("no-prop-callback-in-effect — must-detect regressions", () => {
 });
 
 describe("no-prop-callback-in-effect — regressions", () => {
+  it("treats inline and named prop-derived dependencies identically", () => {
+    const inlineResult = runRule(
+      noPropCallbackInEffect,
+      `function MultiSelectField({ values, onPendingChange }) {
+        useEffect(() => {
+          onPendingChange(values);
+        }, [JSON.stringify(values)]);
+        return null;
+      }`,
+    );
+    const namedResult = runRule(
+      noPropCallbackInEffect,
+      `function MultiSelectField({ values, onPendingChange }) {
+        const valuesKey = JSON.stringify(values);
+        useEffect(() => {
+          onPendingChange(values);
+        }, [valuesKey]);
+        return null;
+      }`,
+    );
+
+    expect(inlineResult.parseErrors).toEqual([]);
+    expect(namedResult.parseErrors).toEqual([]);
+    expect(inlineResult.diagnostics).toEqual([]);
+    expect(namedResult.diagnostics).toEqual([]);
+  });
+
+  it("flags a genuine local-state mirror through direct and callback-ref calls", () => {
+    const directResult = runRule(
+      noPropCallbackInEffect,
+      `function MultiSelectField({ onPendingChange }) {
+        const [draft, setDraft] = useState([]);
+        const draftKey = JSON.stringify(draft);
+        useEffect(() => {
+          onPendingChange(draft);
+        }, [draftKey]);
+        return null;
+      }`,
+    );
+    const refResult = runRule(
+      noPropCallbackInEffect,
+      `function MultiSelectField({ onPendingChange }) {
+        const [draft, setDraft] = useState([]);
+        const draftKey = JSON.stringify(draft);
+        const onPendingChangeRef = useRef(onPendingChange);
+        useEffect(() => {
+          onPendingChangeRef.current?.(draft);
+        }, [draftKey]);
+        return null;
+      }`,
+    );
+
+    expect(directResult.parseErrors).toEqual([]);
+    expect(refResult.parseErrors).toEqual([]);
+    expect(directResult.diagnostics).toHaveLength(1);
+    expect(refResult.diagnostics).toHaveLength(1);
+  });
+
+  it("flags callback-ref mirrors through transparent receiver wrappers", () => {
+    const result = runRule(
+      noPropCallbackInEffect,
+      `function MultiSelectField({ onPendingChange }) {
+        const [draft, setDraft] = useState([]);
+        const onPendingChangeRef = useRef(onPendingChange);
+        useEffect(() => {
+          (onPendingChangeRef as any).current(draft);
+          (onPendingChangeRef!).current(draft);
+        }, [draft]);
+        return null;
+      }`,
+    );
+
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toHaveLength(2);
+  });
+
   it("stays silent when the prop is a pure transform consumed locally", () => {
     const result = runRule(
       noPropCallbackInEffect,
@@ -198,6 +274,88 @@ describe("no-prop-callback-in-effect — regressions", () => {
     );
     expect(result.parseErrors).toEqual([]);
     expect(result.diagnostics).toEqual([]);
+  });
+
+  // Docs-validation r2: AlbumRow (notifyRestoreCompletePendingRef) and
+  // CanonCard (settledRef) — a ref latch read in the guard and written
+  // in the effect makes it a one-shot completion signal, not a mirror.
+  it("stays silent for a ref-latch-guarded one-shot completion callback", () => {
+    const result = runRule(
+      noPropCallbackInEffect,
+      `function AlbumRow({ onScrollRestoreComplete }) {
+        const [artworkBudget, setArtworkBudget] = useState(0);
+        const notifyPendingRef = useRef(false);
+        useLayoutEffect(() => {
+          if (!notifyPendingRef.current) return;
+          notifyPendingRef.current = false;
+          onScrollRestoreComplete?.();
+        }, [artworkBudget, onScrollRestoreComplete]);
+        return null;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("stays silent for a settledRef-deduped subscription completion event", () => {
+    const result = runRule(
+      noPropCallbackInEffect,
+      `function CanonCard({ entry, onJobCompleted, onJobFailed }) {
+        const [inFlightJobId, setInFlightJobId] = useState(null);
+        const { status, filename, error } = useMediaJobProgress(inFlightJobId);
+        const settledRef = useRef(null);
+        useEffect(() => {
+          if (!inFlightJobId) { settledRef.current = null; return; }
+          if (settledRef.current === inFlightJobId) return;
+          if (status === 'completed' && filename) {
+            settledRef.current = inFlightJobId;
+            onJobCompleted?.(entry.id, filename, inFlightJobId);
+          } else if (status === 'failed') {
+            settledRef.current = inFlightJobId;
+            onJobFailed?.(entry.id, error || status, inFlightJobId);
+          }
+        }, [inFlightJobId, status, filename, error, entry.id, onJobCompleted, onJobFailed]);
+        return null;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  // Docs-validation r2: LocalSetupPanel — a usePrevious dep means the
+  // effect is an edge-triggered transition detector, not a state mirror.
+  it("stays silent for a usePrevious edge-triggered notification", () => {
+    const result = runRule(
+      noPropCallbackInEffect,
+      `function LocalSetupPanel({ onPackagesChanged }) {
+        const [check, setCheck] = useState(null);
+        const allInstalled = !!check && check.missing.length === 0;
+        const hadMissing = !!check && check.missing.length > 0;
+        const prevHadMissing = usePrevious(hadMissing, false);
+        useEffect(() => {
+          if (allInstalled && prevHadMissing) onPackagesChanged?.();
+        }, [allInstalled, prevHadMissing, onPackagesChanged]);
+        return null;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("still flags a mirror effect that merely reads (never writes) a ref", () => {
+    const result = runRule(
+      noPropCallbackInEffect,
+      `function Field({ onChange }) {
+        const [value, setValue] = useState("");
+        const mountedRef = useRef(true);
+        useEffect(() => {
+          if (mountedRef.current) onChange(value);
+        }, [value]);
+        return null;
+      }`,
+    );
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics.length).toBeGreaterThan(0);
   });
 
   it("stays silent when the synced state is driven by a WebSocket onmessage handler", () => {

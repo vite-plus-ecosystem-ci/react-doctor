@@ -116,6 +116,7 @@ const supplyChainDiagnostic: Diagnostic = {
 
 const layersOf = (config: {
   diagnostics?: ReadonlyArray<Diagnostic>;
+  linter?: Layer.Layer<Linter>;
   deadCode?: ReadonlyArray<Diagnostic>;
   supplyChain?: ReadonlyArray<Diagnostic>;
   githubViewerPermission?: string | null;
@@ -128,7 +129,7 @@ const layersOf = (config: {
     Project.layerOf(sampleProject),
     Config.layerOf({ config: null, resolvedDirectory: "/repo", configSourceDirectory: null }),
     Files.layerInMemory(new Map()),
-    Linter.layerOf(config.diagnostics ?? []),
+    config.linter ?? Linter.layerOf(config.diagnostics ?? []),
     LintPartialFailures.layerLive,
     DeadCode.layerOf(config.deadCode ?? []),
     Git.layerOf({
@@ -811,6 +812,31 @@ describe("runInspect — scan progress phases", () => {
 });
 
 describe("runInspect — diff mode skips dead-code", () => {
+  it("canonicalizes file coverage before counting completed include paths", async () => {
+    const coverageLinter = Layer.mock(Linter, {
+      run: (input) =>
+        Stream.unwrap(
+          Effect.sync(() => {
+            const includePaths = input.includePaths ?? [];
+            input.onFileCoverage?.({
+              candidateFiles: includePaths,
+              analyzedFiles: includePaths,
+            });
+            return Stream.empty;
+          }),
+        ),
+    });
+    const output = await Effect.runPromise(
+      runInspect({
+        ...baseInput,
+        includePaths: ["src/App.tsx", "./src/App.tsx"],
+      }).pipe(Effect.provide(layersOf({ linter: coverageLinter }))),
+    );
+
+    expect(output.scannedFileCount).toBe(1);
+    expect(output.analyzedFiles).toEqual(["src/App.tsx"]);
+  });
+
   it("treats includePaths.length > 0 as diff mode and skips DeadCode.run", async () => {
     const output = await Effect.runPromise(
       runInspect({ ...baseInput, includePaths: ["src/App.tsx"] }).pipe(
@@ -822,7 +848,7 @@ describe("runInspect — diff mode skips dead-code", () => {
     expect(output.didDeadCodeFail).toBe(false);
   });
 
-  it("passes Next middleware and proxy entries through to the linter", async () => {
+  it("passes every supported explicit source file through to the linter", async () => {
     const nextProject: ProjectInfo = {
       ...sampleProject,
       framework: "nextjs",
@@ -872,12 +898,14 @@ describe("runInspect — diff mode skips dead-code", () => {
       "/repo/middleware.ts",
       "/repo/src/App.tsx",
       "/repo/src/proxy.mjs",
+      "/repo/src/server.ts",
     ]);
     // The Reporter captures diagnostics as they stream through, before the
     // final sort — so it preserves the linter's arrival (includePaths) order.
     expect(result.captured.map((diagnostic) => diagnostic.filePath)).toEqual([
       "/repo/middleware.ts",
       "/repo/src/proxy.mjs",
+      "/repo/src/server.ts",
       "/repo/src/App.tsx",
     ]);
   });
@@ -929,6 +957,70 @@ describe("runInspect — Reporter sees post-filter diagnostics", () => {
     );
     expect(result.output.diagnostics.map((d) => d.filePath)).toEqual(["/repo/src/App.tsx"]);
     expect(result.captured.map((d) => d.filePath)).toEqual(["/repo/src/App.tsx"]);
+  });
+});
+
+describe("runInspect — related-diagnostic dedupe on the production lint path", () => {
+  const nativeHooksDiagnostic: Diagnostic = {
+    filePath: "/repo/src/App.tsx",
+    plugin: "react-doctor",
+    rule: "rules-of-hooks",
+    severity: "error",
+    message: "React Hook is called conditionally",
+    help: "",
+    line: 3,
+    column: 5,
+    category: "Correctness",
+  };
+  const compilerHooksDiagnostic: Diagnostic = {
+    ...nativeHooksDiagnostic,
+    plugin: "react-hooks-js",
+    rule: "hooks",
+    message: "Hooks must always be called in a consistent order",
+  };
+  const collectOutputAndCapturedDiagnostics = Effect.gen(function* () {
+    const output = yield* runInspect(baseInput);
+    const ref = yield* ReporterCapture;
+    const captured = yield* Ref.get(ref);
+    return { output, captured };
+  });
+
+  it("drops the compiler duplicate at a surviving native site and emits the deduped set", async () => {
+    const result = await Effect.runPromise(
+      collectOutputAndCapturedDiagnostics.pipe(
+        Effect.provide(layersOf({ diagnostics: [compilerHooksDiagnostic, nativeHooksDiagnostic] })),
+      ),
+    );
+
+    expect(result.output.diagnostics).toEqual([nativeHooksDiagnostic]);
+    expect(result.captured).toEqual(result.output.diagnostics);
+  });
+
+  it("preserves the compiler finding when config suppresses the native rule", async () => {
+    const layers = Layer.mergeAll(
+      Project.layerOf(sampleProject),
+      Config.layerOf({
+        config: { ignore: { rules: ["react-doctor/rules-of-hooks"] } },
+        resolvedDirectory: "/repo",
+        configSourceDirectory: null,
+      }),
+      Files.layerInMemory(new Map()),
+      Linter.layerOf([compilerHooksDiagnostic, nativeHooksDiagnostic]),
+      LintPartialFailures.layerLive,
+      DeadCode.layerOf([]),
+      Git.layerOf({}),
+      Score.layerOf(null),
+      SupplyChain.layerOf([]),
+      Progress.layerNoop,
+      Reporter.layerCapture,
+      Layer.succeed(DeadCodeOverlap, "off"),
+    );
+    const result = await Effect.runPromise(
+      collectOutputAndCapturedDiagnostics.pipe(Effect.provide(layers)),
+    );
+
+    expect(result.output.diagnostics).toEqual([compilerHooksDiagnostic]);
+    expect(result.captured).toEqual(result.output.diagnostics);
   });
 });
 
