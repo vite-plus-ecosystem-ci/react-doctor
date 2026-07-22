@@ -1,0 +1,105 @@
+.npmrc
+  s_61e825252de171::t_5c5093f4b0518f 2-3
+package.json
+  s_61e825252de171::t_a2a0898bd7ae76 53-54,60
+packages/core/package.json
+  s_61e825252de171::t_515bdb3ef1dba4 41-42
+packages/core/tests/regressions/issue-920-object-prototype-keys.test.ts
+  s_738d33a6d3cd16::t_73f7bcc3555fb1 1
+packages/core/tests/rule-key-aliases.test.ts
+  s_738d33a6d3cd16::t_ee6ef98f49f9dd 1
+packages/deslop-js/tests/fixtures/config-entry-seed/vite.config.ts
+  s_738d33a6d3cd16::t_d1465bb5e1e2bc 1
+packages/deslop-js/tests/fixtures/config-exclusion/vitest.config.ts
+  s_0ac33e64701c66::t_97229ef48dcbf6 1
+packages/deslop-js/tests/fixtures/default-import-named-export/src/settings-panel.test.tsx
+  s_738d33a6d3cd16::t_c835e8a9c5983c 2
+packages/deslop-js/tests/fixtures/test-mock-import/__tests__/example.test.ts
+  s_738d33a6d3cd16::t_8881994f416185 1
+packages/deslop-js/tests/fixtures/tsdown-entry/tsdown.config.ts
+  s_738d33a6d3cd16::t_ec6a722b50417a 1
+packages/deslop-js/tests/fixtures/vite-resolve-alias/vite.config.ts
+  s_738d33a6d3cd16::t_fdb2e837467110 3
+packages/deslop-js/tests/fixtures/vitest-automock/__tests__/server.test.ts
+  s_738d33a6d3cd16::t_861c8e675771cb 1
+packages/deslop-js/tests/fixtures/vitest-automock/__tests__/utils.test.ts
+  s_738d33a6d3cd16::t_be3a34014e4fab 1
+packages/deslop-js/tests/fixtures/vitest-coverage/vitest.config.ts
+  s_738d33a6d3cd16::t_d68412abd6ea1c 1
+packages/deslop-js/tests/fixtures/vitest-custom/vitest.config.ts
+  s_738d33a6d3cd16::t_bc7ce2c489f114 1
+packages/deslop-js/tests/fixtures/vitest-override-target/vitest.config.ts
+  s_738d33a6d3cd16::t_b0820926467068 1
+packages/deslop-js/tests/fixtures/vitest-setup/vitest.config.ts
+  s_738d33a6d3cd16::t_4e05668e58279f 1
+packages/fuzz/corpus/regressions/alt-text--local-test-scaffold.test.tsx
+  s_738d33a6d3cd16::t_decb930325a81a 5
+packages/fuzz/corpus/regressions/alt-text--table-driven-local-test-scaffold.test.tsx
+  s_738d33a6d3cd16::t_93c5a5697189fc 5
+packages/fuzz/corpus/regressions/alt-text--tagged-table-driven-local-test-scaffold.test.tsx
+  s_738d33a6d3cd16::t_a096b39e84fccd 5
+packages/fuzz/corpus/regressions/iframe-has-title--local-test-scaffold.test.tsx
+  s_738d33a6d3cd16::t_f9890e7891af02 5
+packages/fuzz/corpus/regressions/interactive-supports-focus--local-test-scaffold.test.tsx
+  s_738d33a6d3cd16::t_7ee59b89d42aa1 5
+packages/fuzz/corpus/regressions/media-has-caption--local-test-scaffold.test.tsx
+  s_738d33a6d3cd16::t_898587bd3235de 5
+packages/fuzz/corpus/regressions/mouse-events-have-key-events--local-test-scaffold.test.tsx
+  s_738d33a6d3cd16::t_0d3b05c0cce500 5
+packages/fuzz/corpus/regressions/no-redundant-roles--local-test-scaffold.test.tsx
+  s_738d33a6d3cd16::t_5e9b2ff82047db 5
+packages/fuzz/corpus/regressions/role-has-required-aria-props--local-test-scaffold.test.tsx
+  s_738d33a6d3cd16::t_aa91c72a5f3c38 5
+packages/fuzz/corpus/regressions/role-supports-aria-props--local-test-scaffold.test.tsx
+  s_738d33a6d3cd16::t_7183392e10f65d 5
+packages/fuzz/corpus/true-positives/alt-text--imported-provider-children-prop-subject.test.tsx
+  s_738d33a6d3cd16::t_81268e8a36ead3 5
+packages/fuzz/corpus/true-positives/alt-text--imported-provider-direct-subject.test.tsx
+  s_738d33a6d3cd16::t_bf37cee54709cd 5
+packages/oxlint-plugin-react-doctor/package.json
+  s_5049d72a2fb6ba::t_c4f8855b067adf 62-63
+packages/react-doctor/package.json
+  s_5049d72a2fb6ba::t_a87bc180ba4af1 90-91
+pnpm-workspace.yaml
+  s_61e825252de171::t_38d68d7d681ce4 9-37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "80128cff29dd4d4250abff2b44e51dae0775eb50",
+  "prompts": {},
+  "sessions": {
+    "s_0ac33e64701c66": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_075d29060ffezQSiOhstWcng5h",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "wan9chi <dk4rest@gmail.com>"
+    },
+    "s_5049d72a2fb6ba": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_075d29066ffehEn1pK41f060pe",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "wan9chi <dk4rest@gmail.com>"
+    },
+    "s_61e825252de171": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_075d2910cffec5F5nSxiexsTBV",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "wan9chi <dk4rest@gmail.com>"
+    },
+    "s_738d33a6d3cd16": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_075d29117ffes1IRWCYRPT5qsp",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "wan9chi <dk4rest@gmail.com>"
+    }
+  }
+}
