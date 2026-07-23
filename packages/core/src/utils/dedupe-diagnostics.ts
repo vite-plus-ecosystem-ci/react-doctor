@@ -1,12 +1,9 @@
 import type { Diagnostic } from "../types/index.js";
 
 // HACK: oxlint plugin rules occasionally emit the same diagnostic
-// twice (e.g. when a rule's listener visits the same AST node through
-// two overlapping selectors). The duplicates have identical filePath,
-// line, column, plugin, rule, message, and severity. This safety net
-// collapses them on the react-doctor side so downstream consumers
-// (renderer, JSON output, score API) always see one diagnostic per
-// unique site — independent of plugin-rule correctness.
+// twice. This safety net collapses exact duplicates before cache storage
+// and replay. Cross-rule deduplication happens after the diagnostic
+// pipeline so independently suppressed rules cannot erase one another.
 //
 // Field selection rationale: position + plugin + rule + message +
 // severity are the user-visible identity of a diagnostic. `help`,

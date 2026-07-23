@@ -3,8 +3,11 @@
 // is optional here. The resolvers use that to distinguish "user passed
 // nothing" from "user passed a value" without consulting `program`.
 export interface InspectFlags {
+  design?: boolean;
   lint?: boolean;
   deadCode?: boolean;
+  // Resolved against `supplyChain.enabled` (this flag wins), like lint/deadCode.
+  supplyChain?: boolean;
   verbose?: boolean;
   // Forces a Sentry trace and prints its id at the end. Conflicts with
   // --no-score / --no-telemetry, which disable the telemetry it needs.
@@ -26,6 +29,9 @@ export interface InspectFlags {
   project?: string;
   scope?: string;
   base?: string;
+  // Working-tree-only opt-in: fold ordinary (non-ignored) untracked files into
+  // the files/changed/lines scopes so brand-new, unstaged files get scanned.
+  includeUntracked?: boolean;
   // Deprecated alias for `--scope` (warns at runtime); resolved by resolveScope.
   diff?: boolean | string;
   changedFilesFrom?: string;

@@ -15,6 +15,18 @@ export {
 
 export const JSX_FILE_PATTERN = /\.(tsx|jsx)$/;
 
+export const TYPESCRIPT_DECLARATION_FILE_PATTERN = /\.d\.(?:ts|mts|cts)$/;
+
+// HACK: Oxlint 1.68 added ambient-context parser diagnostics that ignore
+// projects' skipLibCheck setting. Preserve the existing report and score
+// contract while keeping earlier TypeScript parser diagnostics visible.
+export const OXLINT_IGNORED_DECLARATION_DIAGNOSTIC_CODES: ReadonlySet<string> = new Set([
+  "TS(1036)",
+  "TS(1038)",
+  "TS(1183)",
+  "TS(1319)",
+]);
+
 // Whether `"warning"`-severity diagnostics surface when neither the
 // caller (`--warnings` / `warnings:`) nor `config.warnings` decide.
 // Warnings show by default — only `"error"` is too generous a bar for a
@@ -44,6 +56,65 @@ export const LATEST_KNOWN_PREACT_MAJOR = 20;
 // Lowest Preact major react-doctor emits a `preact:<major>` capability
 // for. Preact X (10) is the modern baseline.
 export const EARLIEST_GATED_PREACT_MAJOR = 10;
+
+// Valtio shipped the useSnapshot render contract in v1. The upper bound
+// follows the same untrusted-version clamp as React and Preact.
+export const EARLIEST_GATED_VALTIO_MAJOR = 1;
+export const EARLIEST_GATED_STYLED_COMPONENTS_MAJOR = 6;
+export const LATEST_KNOWN_VALTIO_MAJOR = 10;
+export const LATEST_KNOWN_REMOTION_MAJOR = 30;
+
+export const EARLIEST_GATED_REMOTION_MAJOR = 4;
+
+export const EARLIEST_GATED_MOBX_MAJOR = 4;
+
+export const LATEST_SUPPORTED_MOBX_MAJOR = 6;
+export const MOBX_ABORT_SIGNAL_MAJOR = 6;
+export const MOBX_ABORT_SIGNAL_MINOR = 10;
+export const MOBX_REACT_OBSERVER_MEMO_GUARD_MAJOR = 7;
+export const MOBX_REACT_OBSERVER_MEMO_GUARD_MINOR = 3;
+export const MOBX_REACT_LITE_OBSERVER_MEMO_GUARD_MAJOR = 3;
+export const MOBX_REACT_LITE_OBSERVER_MEMO_GUARD_MINOR = 3;
+export const EARLIEST_GATED_ZUSTAND_MAJOR = 1;
+
+export const LATEST_SUPPORTED_ZUSTAND_MAJOR = 5;
+
+export const LATEST_KNOWN_R3F_MAJOR = 10;
+
+export const EARLIEST_GATED_R3F_MAJOR = 3;
+
+export const EARLIEST_GATED_THREE_RELEASE = 145;
+
+export const LATEST_KNOWN_THREE_RELEASE = 250;
+
+export interface ReactRouterCapabilityThreshold {
+  capability:
+    | "react-router:6.4"
+    | "react-router:6.7"
+    | "react-router:6.9"
+    | "react-router:6.19"
+    | "react-router:7"
+    | "react-router:7.8"
+    | "react-router:7.9"
+    | "react-router:7.10"
+    | "react-router:7.15"
+    | "react-router:8";
+  major: number;
+  minor: number;
+}
+
+export const REACT_ROUTER_CAPABILITY_THRESHOLDS: ReadonlyArray<ReactRouterCapabilityThreshold> = [
+  { capability: "react-router:6.4", major: 6, minor: 4 },
+  { capability: "react-router:6.7", major: 6, minor: 7 },
+  { capability: "react-router:6.9", major: 6, minor: 9 },
+  { capability: "react-router:6.19", major: 6, minor: 19 },
+  { capability: "react-router:7", major: 7, minor: 0 },
+  { capability: "react-router:7.8", major: 7, minor: 8 },
+  { capability: "react-router:7.9", major: 7, minor: 9 },
+  { capability: "react-router:7.10", major: 7, minor: 10 },
+  { capability: "react-router:7.15", major: 7, minor: 15 },
+  { capability: "react-router:8", major: 8, minor: 0 },
+];
 
 // Max chars of an unparseable oxlint stdout we keep for the error
 // message. oxlint prints a multi-line, framed error to stdout when it
@@ -204,9 +275,152 @@ export const GIT_SHOW_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 
 export const TSCONFIG_EXTENDS_MAX_DEPTH = 8;
 
+export const REACT_COMPILER_CONFIG_IMPORT_MAX_DEPTH = 4;
+
 export const ES2023_YEAR = 2023;
 
 export const UNKNOWN_FUTURE_ES_YEAR = 9999;
+
+export interface TargetBlankBrowserSupport {
+  browserName: string;
+  supportsTargetBlankBrowsingContext: boolean;
+  implicitNoopenerVersion: number | null;
+  explicitNoopenerVersion: number | null;
+  explicitNoreferrerVersion: number | null;
+}
+
+export const TARGET_BLANK_BROWSER_SUPPORT: ReadonlyArray<TargetBlankBrowserSupport> = [
+  {
+    browserName: "chrome",
+    supportsTargetBlankBrowsingContext: true,
+    explicitNoreferrerVersion: 16,
+    explicitNoopenerVersion: 49,
+    implicitNoopenerVersion: 88,
+  },
+  {
+    browserName: "and_chr",
+    supportsTargetBlankBrowsingContext: true,
+    explicitNoreferrerVersion: 16,
+    explicitNoopenerVersion: 49,
+    implicitNoopenerVersion: 88,
+  },
+  {
+    browserName: "android",
+    supportsTargetBlankBrowsingContext: true,
+    explicitNoreferrerVersion: 2.3,
+    explicitNoopenerVersion: 49,
+    implicitNoopenerVersion: 88,
+  },
+  {
+    browserName: "edge",
+    supportsTargetBlankBrowsingContext: true,
+    explicitNoreferrerVersion: 13,
+    explicitNoopenerVersion: 79,
+    implicitNoopenerVersion: 88,
+  },
+  {
+    browserName: "firefox",
+    supportsTargetBlankBrowsingContext: true,
+    explicitNoreferrerVersion: 33,
+    explicitNoopenerVersion: 52,
+    implicitNoopenerVersion: 79,
+  },
+  {
+    browserName: "and_ff",
+    supportsTargetBlankBrowsingContext: true,
+    explicitNoreferrerVersion: 33,
+    explicitNoopenerVersion: 52,
+    implicitNoopenerVersion: 79,
+  },
+  {
+    browserName: "kaios",
+    supportsTargetBlankBrowsingContext: true,
+    explicitNoreferrerVersion: 2.5,
+    explicitNoopenerVersion: 3,
+    implicitNoopenerVersion: 3,
+  },
+  {
+    browserName: "safari",
+    supportsTargetBlankBrowsingContext: true,
+    explicitNoreferrerVersion: 5,
+    explicitNoopenerVersion: 10.1,
+    implicitNoopenerVersion: 12.1,
+  },
+  {
+    browserName: "ios_saf",
+    supportsTargetBlankBrowsingContext: true,
+    explicitNoreferrerVersion: 4,
+    explicitNoopenerVersion: 10.3,
+    implicitNoopenerVersion: 12.2,
+  },
+  {
+    browserName: "opera",
+    supportsTargetBlankBrowsingContext: true,
+    explicitNoreferrerVersion: 15,
+    explicitNoopenerVersion: 36,
+    implicitNoopenerVersion: 74,
+  },
+  {
+    browserName: "op_mob",
+    supportsTargetBlankBrowsingContext: true,
+    explicitNoreferrerVersion: 80,
+    explicitNoopenerVersion: 80,
+    implicitNoopenerVersion: 80,
+  },
+  {
+    browserName: "op_mini",
+    supportsTargetBlankBrowsingContext: false,
+    explicitNoreferrerVersion: null,
+    explicitNoopenerVersion: null,
+    implicitNoopenerVersion: null,
+  },
+  {
+    browserName: "samsung",
+    supportsTargetBlankBrowsingContext: true,
+    explicitNoreferrerVersion: 4,
+    explicitNoopenerVersion: 5,
+    implicitNoopenerVersion: 15,
+  },
+  {
+    browserName: "and_uc",
+    supportsTargetBlankBrowsingContext: true,
+    explicitNoreferrerVersion: 15.5,
+    explicitNoopenerVersion: 15.5,
+    implicitNoopenerVersion: null,
+  },
+  {
+    browserName: "and_qq",
+    supportsTargetBlankBrowsingContext: true,
+    explicitNoreferrerVersion: 14.9,
+    explicitNoopenerVersion: 14.9,
+    implicitNoopenerVersion: null,
+  },
+  {
+    browserName: "baidu",
+    supportsTargetBlankBrowsingContext: true,
+    explicitNoreferrerVersion: 13.52,
+    explicitNoopenerVersion: 13.52,
+    implicitNoopenerVersion: null,
+  },
+  {
+    browserName: "ie",
+    supportsTargetBlankBrowsingContext: true,
+    explicitNoreferrerVersion: null,
+    explicitNoopenerVersion: null,
+    implicitNoopenerVersion: null,
+  },
+  {
+    browserName: "ie_mob",
+    supportsTargetBlankBrowsingContext: true,
+    explicitNoreferrerVersion: null,
+    explicitNoopenerVersion: null,
+    implicitNoopenerVersion: null,
+  },
+];
+
+export const ELECTRON_EXPLICIT_NOOPENER_MIN_VERSION = "0.37.0";
+
+export const ELECTRON_IMPLICIT_NOOPENER_MIN_VERSION = "12.0.0";
 
 export const ES_TARGET_YEAR_BY_NAME: Readonly<Record<string, number>> = {
   es3: 1999,
@@ -306,6 +520,13 @@ export const OXLINT_OUTPUT_MAX_BYTES = 50 * 1024 * 1024;
 // binding is markedly slower than on a developer laptop.
 export const OXLINT_SPAWN_TIMEOUT_MS = 60_000;
 
+// Longest synchronous burst a cooperative main-thread pass (the security
+// scan's walk / file / rule steps, lint's pre-spawn cache hashing) may hold
+// the event loop before handing it back. Lint child processes are spawned and
+// drained from main-thread continuations, so bursts beyond ~a frame idle the
+// whole worker pool — and starve concurrently-scanning sibling projects.
+export const COOPERATIVE_YIELD_BUDGET_MS = 12;
+
 // Directory name appended to os.tmpdir() to form the shared base for the V8
 // compile cache. Matches the base Node's own module.enableCompileCache() uses,
 // so the bin (parent) and the spawned oxlint batches (children) share one tree.
@@ -327,6 +548,27 @@ export const OXLINT_SPLIT_TOTAL_BUDGET_MS = 180_000;
 // one level of slack and still terminates the recursion deterministically
 // even if the budget clock is somehow not advancing.
 export const OXLINT_SPLIT_MAX_DEPTH = 8;
+
+// Exit codes that mean the oxlint child ABORTED rather than exited. Windows
+// has no POSIX signals, so an aborting child (oxlint's native binding
+// panicking under memory pressure, or Node's own `process.abort()`) reports
+// `signal: null` plus one of these exit codes instead of the SIGABRT a POSIX
+// parent would see: Node normalizes its aborts to 134 (`ExitCode::kAbort` —
+// which is also the POSIX 128+SIGABRT convention), and a Rust / `__fastfail`
+// abort exits with NTSTATUS STATUS_STACK_BUFFER_OVERRUN (0xC0000409).
+// `spawnOxlint` folds these into the same `OxlintBatchExceeded
+// { kind: "oom" }` class as a SIGABRT so the binary-split retry and the OOM
+// rescue pass work on Windows too.
+export const ABORT_EXIT_CODES: ReadonlySet<number> = new Set([134, 0xc0000409]);
+
+// Wall-clock cap on the serial OOM rescue pass (replaying OOM-dropped
+// files one at a time after the parallel pass). The rescue is unbounded
+// by batch count — each file that STILL fails re-waits a spawn timeout —
+// so without a cap a large OOM-dropped set could eat the whole
+// LINT_PHASE_TIMEOUT_MS and convert a partial scan into a total lint
+// failure. 60 s rescues dozens of healthy files while at most one
+// still-pathological file can burn the budget.
+export const OXLINT_OOM_RESCUE_BUDGET_MS = 60_000;
 
 // Effect-side cap on the dead-code phase. Sits ABOVE the in-worker
 // DEAD_CODE_WORKER_TIMEOUT_MS (= 120 s) as a runtime-independent
@@ -450,6 +692,30 @@ export const DIAGNOSTIC_CATEGORY_BUCKETS = [
   "Accessibility",
   "Maintainability",
 ] as const;
+
+// Categories whose findings are matched by occurrence in the CI baseline
+// delta — the finding's identity is the flagged element (a missing
+// attribute, a wrong element), not the flagged line's text — so the delta
+// may match them by same-file `(rule, message)` occurrence count after strict
+// evidence matching. Every Accessibility rule is element-level; rules in other
+// categories opt in individually via their per-rule `matchByOccurrence`
+// flag (see `resolveMatchByOccurrence` in `runners/oxlint/parse-output`).
+export const OCCURRENCE_MATCHED_CATEGORIES: ReadonlySet<string> = new Set(["Accessibility"]);
+
+export const CATEGORY_IMPACT = {
+  Security: "An attacker can read user data, act as your users, or run code you never shipped.",
+  Bugs: "Real users hit crashes, wrong output, or state that silently corrupts.",
+  Performance: "Users feel extra latency and wasted renders on every interaction.",
+  Accessibility: "Users on screen readers, keyboards, or assistive tech get locked out.",
+  Maintainability: "Every future change gets slower and riskier to make.",
+} satisfies Record<(typeof DIAGNOSTIC_CATEGORY_BUCKETS)[number], string>;
+
+const CATEGORY_IMPACT_BY_NAME: ReadonlyMap<string, string> = new Map(
+  Object.entries(CATEGORY_IMPACT),
+);
+
+export const getCategoryImpact = (category: string): string | undefined =>
+  CATEGORY_IMPACT_BY_NAME.get(category);
 
 // Rules whose heuristic only makes sense in application code. A published
 // library deliberately exposes flexible primitives (components built in
@@ -607,7 +873,9 @@ export const SOCKET_FREE_USER_AGENT = "react-doctor-supply-chain";
 // Per-file lint cache (`runners/oxlint/file-lint-cache.ts`). Caches the raw
 // oxlint diagnostics of unchanged files keyed by content hash + ruleset hash,
 // so repeat scans re-lint only the files that actually changed.
-export const FILE_LINT_CACHE_SCHEMA_VERSION = 1;
+// Bumped to 2 when declaration-file parser diagnostic compatibility filtering
+// changed the stored diagnostic set.
+export const FILE_LINT_CACHE_SCHEMA_VERSION = 2;
 
 export const FILE_LINT_CACHE_FILENAME = "file-lint-cache.json";
 
@@ -620,9 +888,48 @@ export const FILE_LINT_CACHE_MAX_RULESET_COUNT = 8;
 // repos; the most-recently-stored entries are kept when over the cap.
 export const FILE_LINT_CACHE_MAX_FILE_COUNT = 50_000;
 
+// Sidecar lint cache (`runners/oxlint/sidecar-lint-cache.ts`). Caches the
+// cross-file rules' per-file diagnostics keyed by content hash + sidecar
+// ruleset hash, each entry guarded by the file's cross-file dependency probe
+// set, so a warm rescan replays the sidecar instead of re-linting every
+// unchanged file. Shares the file cache's bucket/file caps.
+// Bumped to 3 with the same parser-diagnostic compatibility change.
+export const SIDECAR_LINT_CACHE_SCHEMA_VERSION = 3;
+
+export const SIDECAR_LINT_CACHE_FILENAME = "sidecar-lint-cache.json";
+
 // Length (chars) of the project-directory hash used to name the tmp-dir cache
 // fallback when a project has no `node_modules` to host `.cache/react-doctor`.
 export const CACHE_FILENAME_HASH_LENGTH_CHARS = 16;
+
+// Length (chars) of the rule-plugin entry-content hash folded into the
+// per-file lint cache's ruleset hash, so a rebuilt dev plugin (same version,
+// different rule behavior) busts the cache instead of replaying stale
+// diagnostics.
+export const PLUGIN_FINGERPRINT_LENGTH_CHARS = 16;
+
+// This package's own version, inlined at build time (`vite.config.ts` `env`)
+// the same way the CLI inlines `VERSION`; running from source (tests, dev)
+// falls back to "0.0.0". Cache keys include it because cached diagnostics
+// carry core's POST-PROCESSING (message text, toolchain-dependency filtering),
+// so an upgrade must never replay entries shaped by an older core.
+export const CORE_PACKAGE_VERSION = process.env.REACT_DOCTOR_CORE_VERSION ?? "0.0.0";
+
+// Whole-project dead-code result cache (`dead-code/dead-code-result-cache.ts`).
+// Replays deslop's diagnostics — skipping the analysis worker entirely — when
+// nothing the analysis reads has changed since the stored run.
+// Bumped to 2: entries carry a per-file `files` map (mtime, size, content
+// hash) instead of folding the file stats into the key, so a fresh checkout's
+// bumped mtimes can be repaired against unchanged content.
+export const DEAD_CODE_CACHE_SCHEMA_VERSION = 2;
+
+export const DEAD_CODE_CACHE_FILENAME = "dead-code-cache.json";
+
+// deslop's incremental analysis store (`DeslopConfig.incrementalCachePath`) —
+// per-file parse summaries + collect/resolution/package-fact layers, written
+// by the analysis WORKER for the changed-files case the whole-result cache
+// above can't serve. Lives in the same per-project cache directory.
+export const DEAD_CODE_SUMMARY_CACHE_FILENAME = "dead-code-summaries.json";
 
 // Plugin / rule / category identity for the diagnostics the supply-chain
 // check emits. `plugin: "socket"` keeps Socket findings visually distinct
@@ -681,3 +988,5 @@ export const SUPPLY_CHAIN_ALERT_NOTE_MAX_CHARS = 160;
 // Next rule family — so a low Socket score would be redundant noise rather
 // than an actionable, distinct supply-chain signal.
 export const SUPPLY_CHAIN_IGNORED_PACKAGES: ReadonlySet<string> = new Set(["next"]);
+
+export const LINE_FEED_UTF8_BYTE = 10;

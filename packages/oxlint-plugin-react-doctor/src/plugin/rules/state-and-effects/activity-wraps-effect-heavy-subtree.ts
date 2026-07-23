@@ -1,8 +1,9 @@
 import { defineRule } from "../../utils/define-rule.js";
 import { EFFECT_HOOK_NAMES, UPPERCASE_PATTERN } from "../../constants/react.js";
+import type { ScopeAnalysis } from "../../semantic/scope-analysis.js";
 import { findProgramRoot } from "../../utils/find-program-root.js";
 import { getImportedName } from "../../utils/get-imported-name.js";
-import { isHookCall } from "../../utils/is-hook-call.js";
+import { isReactHookCall } from "../../utils/is-react-hook-call.js";
 import { walkAst } from "../../utils/walk-ast.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
@@ -56,42 +57,67 @@ const collectChildComponentNames = (
   });
 };
 
-const findSameFileComponentBody = (
-  programRoot: EsTreeNode,
-  componentName: string,
-): EsTreeNode | null => {
-  let foundBody: EsTreeNode | null = null;
+const countEffectHookCalls = (body: EsTreeNode | null, scopes: ScopeAnalysis): number => {
+  if (!body) return 0;
+  let count = 0;
+  walkAst(body, (child: EsTreeNode) => {
+    if (!isNodeOfType(child, "CallExpression")) return;
+    if (isReactHookCall(child, EFFECT_HOOK_NAMES, scopes)) count++;
+  });
+  return count;
+};
+
+interface ComponentEffectIndex {
+  // First (pre-order) same-file function body per name — the same body a
+  // fresh first-match program walk would resolve.
+  bodyByName: Map<string, EsTreeNode>;
+  // Effect-hook counts, filled lazily per queried component.
+  effectCountByName: Map<string, number>;
+}
+
+// One program walk indexes every named function body; each Activity child
+// then costs a Map lookup plus one lazily-cached body count, instead of a
+// full program walk per child name per Activity element.
+const componentEffectIndexCache = new WeakMap<EsTreeNode, ComponentEffectIndex>();
+
+const getComponentEffectIndex = (programRoot: EsTreeNode): ComponentEffectIndex => {
+  const cached = componentEffectIndexCache.get(programRoot);
+  if (cached) return cached;
+  const bodyByName = new Map<string, EsTreeNode>();
   walkAst(programRoot, (node: EsTreeNode) => {
-    if (foundBody) return false;
-    if (isNodeOfType(node, "FunctionDeclaration") && node.id && node.id.name === componentName) {
-      foundBody = node.body;
-      return false;
+    if (isNodeOfType(node, "FunctionDeclaration") && node.id && !bodyByName.has(node.id.name)) {
+      bodyByName.set(node.id.name, node.body);
+      return;
     }
     if (
       isNodeOfType(node, "VariableDeclarator") &&
       isNodeOfType(node.id, "Identifier") &&
-      node.id.name === componentName
+      !bodyByName.has(node.id.name)
     ) {
       const initializer = node.init;
       if (
         isNodeOfType(initializer, "ArrowFunctionExpression") ||
         isNodeOfType(initializer, "FunctionExpression")
       ) {
-        foundBody = initializer.body;
-        return false;
+        bodyByName.set(node.id.name, initializer.body);
       }
     }
   });
-  return foundBody;
+  const index: ComponentEffectIndex = { bodyByName, effectCountByName: new Map() };
+  componentEffectIndexCache.set(programRoot, index);
+  return index;
 };
 
-const countEffectHookCalls = (body: EsTreeNode | null): number => {
-  if (!body) return 0;
-  let count = 0;
-  walkAst(body, (child: EsTreeNode) => {
-    if (!isNodeOfType(child, "CallExpression")) return;
-    if (isHookCall(child, EFFECT_HOOK_NAMES)) count++;
-  });
+const getSameFileComponentEffectCount = (
+  programRoot: EsTreeNode,
+  componentName: string,
+  scopes: ScopeAnalysis,
+): number => {
+  const index = getComponentEffectIndex(programRoot);
+  const cachedCount = index.effectCountByName.get(componentName);
+  if (cachedCount !== undefined) return cachedCount;
+  const count = countEffectHookCalls(index.bodyByName.get(componentName) ?? null, scopes);
+  index.effectCountByName.set(componentName, count);
   return count;
 };
 
@@ -192,9 +218,11 @@ export const activityWrapsEffectHeavySubtree = defineRule({
         let totalEffects = 0;
         const effectfulChildren: string[] = [];
         for (const componentName of childComponentNames) {
-          const body = findSameFileComponentBody(programRoot, componentName);
-          if (!body) continue;
-          const effectCount = countEffectHookCalls(body);
+          const effectCount = getSameFileComponentEffectCount(
+            programRoot,
+            componentName,
+            context.scopes,
+          );
           if (effectCount === 0) continue;
           totalEffects += effectCount;
           effectfulChildren.push(`<${componentName}>`);

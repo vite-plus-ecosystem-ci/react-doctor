@@ -11,7 +11,13 @@ export * from "./run-inspect.js";
 // TypeScript-type definitions in `./types/index.js`. Consumers that
 // need the Schema classes import directly via
 // `@react-doctor/core/schemas` or the in-tree relative path.
-export { Severity, JsonReportV1, buildDiagnosticIdentity } from "./schemas.js";
+export {
+  Severity,
+  JsonReportV1,
+  JsonReportV2,
+  JsonReportV3,
+  buildDiagnosticIdentity,
+} from "./schemas.js";
 export * from "./services/config.js";
 export * from "./services/dead-code.js";
 export * from "./services/files.js";
@@ -87,9 +93,12 @@ export * from "./utils/dedupe-diagnostics.js";
 export * from "./utils/define-config.js";
 export * from "./utils/detect-ai-training-environment.js";
 export * from "./utils/group-by.js";
+export * from "./utils/hash-file-contents.js";
 export * from "./utils/has-published-fix-recipe.js";
+export * from "./utils/has-react-runtime.js";
 export * from "./utils/is-errno-exception.js";
 export * from "./utils/is-large-minified-file.js";
+export * from "./utils/is-scan-complete.js";
 export * from "./utils/list-source-files.js";
 export * from "./utils/map-with-concurrency.js";
 export * from "./utils/match-glob-pattern.js";
@@ -100,10 +109,12 @@ export * from "./utils/remaining-deadline-budget-ms.js";
 export * from "./utils/resolve-auto-scan-concurrency.js";
 export * from "./utils/resolve-github-actions-score-metadata.js";
 export * from "./utils/resolve-lint-batch-ordering.js";
+export * from "./utils/resolve-react-doctor-cache-dir.js";
 export * from "./utils/resolve-scan-concurrency.js";
+export * from "./utils/scrub-sensitive-paths.js";
 export * from "./utils/sort-diagnostics-stable.js";
 export * from "./utils/to-relative-path.js";
 export * from "./utils/warn-config-issue.js";
-export * from "./runners/oxlint/capabilities.js";
+export * from "./project-info/capabilities.js";
 export * from "./runners/oxlint/config.js";
 export * from "./runners/oxlint/plugin-resolution.js";

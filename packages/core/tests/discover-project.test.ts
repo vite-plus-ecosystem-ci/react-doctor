@@ -3,6 +3,7 @@ import os from "node:os";
 import * as path from "node:path";
 import { afterAll, describe, expect, it } from "vite-plus/test";
 import {
+  buildCapabilities,
   discoverProject,
   discoverReactSubprojects,
   formatFrameworkName,
@@ -13,10 +14,123 @@ import {
 const FIXTURES_DIRECTORY = path.resolve(import.meta.dirname, "fixtures");
 const VALID_FRAMEWORKS = ["nextjs", "vite", "cra", "remix", "gatsby", "unknown"];
 
+interface ReactCompilerDetectionCase {
+  readonly name: string;
+  readonly config: string;
+  readonly expected: boolean;
+  readonly helper?: string;
+}
+
 describe("discoverProject", () => {
   it("detects React version from package.json", () => {
     const projectInfo = discoverProject(path.join(FIXTURES_DIRECTORY, "basic-react"));
     expect(projectInfo.reactVersion).toBe("^19.0.0");
+  });
+
+  it("detects React Router version from react-router-dom", () => {
+    const projectDirectory = path.join(tempDirectory, "react-router-dom-version");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "react-router-dom-version",
+        dependencies: { react: "^19.0.0", "react-router-dom": "^6.30.1" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.reactRouterVersion).toBe("^6.30.1");
+    expect(projectInfo.hasReactRouterFramework).toBe(false);
+  });
+
+  it("detects React Router Framework mode from @react-router/dev", () => {
+    const projectDirectory = path.join(tempDirectory, "react-router-framework-version");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "react-router-framework-version",
+        dependencies: { react: "^19.0.0", "react-router": "^7.9.0" },
+        devDependencies: { "@react-router/dev": "^7.9.0" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.reactRouterVersion).toBe("^7.9.0");
+    expect(projectInfo.hasReactRouterFramework).toBe(true);
+  });
+
+  it("uses the lowest React Router version across mixed-version workspaces", () => {
+    const projectDirectory = path.join(tempDirectory, "mixed-react-router-workspaces");
+    const legacyDirectory = path.join(projectDirectory, "packages", "legacy");
+    const modernDirectory = path.join(projectDirectory, "packages", "modern");
+    fs.mkdirSync(legacyDirectory, { recursive: true });
+    fs.mkdirSync(modernDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "mixed-react-router-workspaces",
+        private: true,
+        workspaces: ["packages/*"],
+        dependencies: { react: "^19.0.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(legacyDirectory, "package.json"),
+      JSON.stringify({ name: "legacy", dependencies: { "react-router-dom": "^6.30.1" } }),
+    );
+    fs.writeFileSync(
+      path.join(modernDirectory, "package.json"),
+      JSON.stringify({ name: "modern", dependencies: { "react-router": "^8.1.0" } }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.reactRouterVersion).toBe("^6.30.1");
+  });
+
+  it("resolves catalog specs before selecting the lowest React Router workspace version", () => {
+    const projectDirectory = path.join(tempDirectory, "catalog-react-router-workspaces");
+    const legacyDirectory = path.join(projectDirectory, "packages", "legacy");
+    fs.mkdirSync(legacyDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "pnpm-workspace.yaml"),
+      'packages:\n  - "packages/*"\n\ncatalogs:\n  legacy:\n    react-router-dom: ^6.30.1\n',
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "catalog-react-router-workspaces",
+        private: true,
+        workspaces: ["packages/*"],
+        dependencies: { react: "^19.0.0", "react-router": "^8.1.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(legacyDirectory, "package.json"),
+      JSON.stringify({
+        name: "legacy",
+        dependencies: { "react-router-dom": "catalog:legacy" },
+      }),
+    );
+
+    expect(discoverProject(projectDirectory).reactRouterVersion).toBe("^6.30.1");
+    expect(discoverProject(legacyDirectory).reactRouterVersion).toBe("^6.30.1");
+  });
+
+  it("detects React from a UTF-8 BOM-prefixed package.json", () => {
+    const projectDirectory = path.join(tempDirectory, "bom-prefixed-package-json");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      `\uFEFF${JSON.stringify({
+        name: "bom-prefixed-package-json",
+        dependencies: { react: "^18.3.1" },
+      })}`,
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.reactVersion).toBe("^18.3.1");
+    expect(projectInfo.reactMajorVersion).toBe(18);
   });
 
   it("returns a valid framework", () => {
@@ -64,6 +178,403 @@ describe("discoverProject", () => {
 
     const projectInfo = discoverProject(projectDirectory);
     expect(projectInfo.tailwindVersion).toBe("^3.4.1");
+  });
+
+  it("preserves bare and tagged PostCSS 7 compatibility aliases through capability detection", () => {
+    for (const [caseName, tailwindVersion] of [
+      ["bare", "npm:@tailwindcss/postcss7-compat"],
+      ["latest", "npm:@tailwindcss/postcss7-compat@latest"],
+      ["next", "npm:@tailwindcss/postcss7-compat@next"],
+      ["wildcard", "npm:@tailwindcss/postcss7-compat@*"],
+    ]) {
+      const projectDirectory = path.join(tempDirectory, `tw-postcss7-compat-${caseName}`);
+      fs.mkdirSync(projectDirectory, { recursive: true });
+      fs.writeFileSync(
+        path.join(projectDirectory, "package.json"),
+        JSON.stringify({
+          name: `tw-postcss7-compat-${caseName}`,
+          dependencies: { react: "^18.0.0" },
+          devDependencies: { tailwindcss: tailwindVersion },
+        }),
+      );
+
+      const projectInfo = discoverProject(projectDirectory);
+      const capabilities = buildCapabilities(projectInfo);
+      expect(projectInfo.tailwindVersion).toBe(tailwindVersion);
+      expect(capabilities.has("tailwind")).toBe(true);
+      expect(capabilities.has("tailwind:3.4")).toBe(false);
+      expect(capabilities.has("tailwind:4")).toBe(false);
+    }
+  });
+
+  it("detects an i18n library from runtime dependencies", () => {
+    const projectDirectory = path.join(tempDirectory, "i18n-app");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "i18n-app",
+        dependencies: { react: "^19.0.0", "react-i18next": "^15.0.0" },
+      }),
+    );
+
+    expect(discoverProject(projectDirectory).hasI18nLibrary).toBe(true);
+  });
+
+  it("detects an i18n library from optional dependencies", () => {
+    const projectDirectory = path.join(tempDirectory, "optional-i18n-app");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "optional-i18n-app",
+        dependencies: { react: "^19.0.0" },
+        optionalDependencies: { "react-i18next": "^15.0.0" },
+      }),
+    );
+
+    expect(discoverProject(projectDirectory).hasI18nLibrary).toBe(true);
+  });
+
+  it("reports no i18n library when none is declared", () => {
+    const projectDirectory = path.join(tempDirectory, "single-locale-app");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "single-locale-app",
+        dependencies: { react: "^19.0.0" },
+      }),
+    );
+
+    expect(discoverProject(projectDirectory).hasI18nLibrary).toBe(false);
+  });
+
+  it("detects React Query from a workspace package when scanning the workspace root", () => {
+    const monorepoRoot = path.join(tempDirectory, "react-query-workspace-root");
+    const webDirectory = path.join(monorepoRoot, "apps", "web");
+    fs.mkdirSync(webDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({ name: "root", private: true, workspaces: ["apps/*"] }),
+    );
+    fs.writeFileSync(
+      path.join(webDirectory, "package.json"),
+      JSON.stringify({
+        name: "web",
+        dependencies: { react: "^19.0.0", "@tanstack/react-query": "^5.66.0" },
+      }),
+    );
+
+    const rootProject = discoverProject(monorepoRoot);
+    const leafProject = discoverProject(webDirectory);
+
+    expect(rootProject.tanstackQueryVersion).toBe("^5.66.0");
+    expect(rootProject.hasTanStackQuery).toBe(true);
+    expect(leafProject.tanstackQueryVersion).toBe("^5.66.0");
+    expect(leafProject.hasTanStackQuery).toBe(true);
+  });
+
+  it("detects library capabilities from workspace packages when scanning the workspace root", () => {
+    const monorepoRoot = path.join(tempDirectory, "library-capability-workspace-root");
+    const webDirectory = path.join(monorepoRoot, "apps", "web");
+    fs.mkdirSync(webDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({ name: "root", private: true, workspaces: ["apps/*"] }),
+    );
+    fs.writeFileSync(
+      path.join(webDirectory, "package.json"),
+      JSON.stringify({
+        name: "web",
+        dependencies: {
+          react: "^19.0.0",
+          mobx: "^6.13.0",
+          "styled-components": "^6.1.0",
+        },
+        optionalDependencies: { "react-i18next": "^15.0.0" },
+      }),
+    );
+
+    const projectInfo = discoverProject(monorepoRoot);
+
+    expect(projectInfo.hasI18nLibrary).toBe(true);
+    expect(projectInfo.mobxVersion).toBe("^6.13.0");
+    expect(projectInfo.styledComponentsVersion).toBe("^6.1.0");
+  });
+
+  it("uses the oldest styled-components major across workspace packages", () => {
+    const monorepoRoot = path.join(tempDirectory, "mixed-styled-components-workspace-root");
+    const modernDirectory = path.join(monorepoRoot, "apps", "a-modern");
+    const legacyDirectory = path.join(monorepoRoot, "apps", "b-legacy");
+    fs.mkdirSync(modernDirectory, { recursive: true });
+    fs.mkdirSync(legacyDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({
+        name: "root",
+        private: true,
+        workspaces: ["apps/*"],
+        dependencies: { "styled-components": "^6.1.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(modernDirectory, "package.json"),
+      JSON.stringify({
+        name: "modern",
+        dependencies: { react: "^19.0.0", "styled-components": "^6.1.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(legacyDirectory, "package.json"),
+      JSON.stringify({
+        name: "legacy",
+        dependencies: { react: "^18.3.1", "styled-components": "^5.3.11" },
+      }),
+    );
+
+    expect(discoverProject(monorepoRoot).styledComponentsVersion).toBe("^5.3.11");
+  });
+
+  it("suppresses styled-components v6 capabilities for an unparseable workspace spec", () => {
+    const monorepoRoot = path.join(tempDirectory, "unknown-styled-components-workspace-root");
+    const webDirectory = path.join(monorepoRoot, "apps", "web");
+    fs.mkdirSync(webDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({
+        name: "root",
+        private: true,
+        workspaces: ["apps/*"],
+        dependencies: { "styled-components": "^6.1.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(webDirectory, "package.json"),
+      JSON.stringify({
+        name: "web",
+        dependencies: { react: "^19.0.0", "styled-components": "workspace:*" },
+      }),
+    );
+
+    expect(discoverProject(monorepoRoot).styledComponentsVersion).toBe("workspace:*");
+  });
+
+  it("uses a parseable styled-components v5 spec after an unparseable workspace spec", () => {
+    const monorepoRoot = path.join(tempDirectory, "unknown-before-legacy-styled-workspace-root");
+    const unknownDirectory = path.join(monorepoRoot, "apps", "a-unknown");
+    const legacyDirectory = path.join(monorepoRoot, "apps", "b-legacy");
+    fs.mkdirSync(unknownDirectory, { recursive: true });
+    fs.mkdirSync(legacyDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({ name: "root", private: true, workspaces: ["apps/*"] }),
+    );
+    fs.writeFileSync(
+      path.join(unknownDirectory, "package.json"),
+      JSON.stringify({
+        name: "unknown",
+        dependencies: { react: "^19.0.0", "styled-components": "workspace:*" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(legacyDirectory, "package.json"),
+      JSON.stringify({
+        name: "legacy",
+        dependencies: { react: "^18.3.1", "styled-components": "^5.3.11" },
+      }),
+    );
+
+    expect(discoverProject(monorepoRoot).styledComponentsVersion).toBe("^5.3.11");
+  });
+
+  it("keeps a parseable styled-components v5 spec before an unparseable workspace spec", () => {
+    const monorepoRoot = path.join(tempDirectory, "legacy-before-unknown-styled-workspace-root");
+    const legacyDirectory = path.join(monorepoRoot, "apps", "a-legacy");
+    const unknownDirectory = path.join(monorepoRoot, "apps", "b-unknown");
+    fs.mkdirSync(legacyDirectory, { recursive: true });
+    fs.mkdirSync(unknownDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({ name: "root", private: true, workspaces: ["apps/*"] }),
+    );
+    fs.writeFileSync(
+      path.join(legacyDirectory, "package.json"),
+      JSON.stringify({
+        name: "legacy",
+        dependencies: { react: "^18.3.1", "styled-components": "^5.3.11" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(unknownDirectory, "package.json"),
+      JSON.stringify({
+        name: "unknown",
+        dependencies: { react: "^19.0.0", "styled-components": "workspace:*" },
+      }),
+    );
+
+    expect(discoverProject(monorepoRoot).styledComponentsVersion).toBe("^5.3.11");
+  });
+
+  it("keeps an unparseable styled-components spec before a v6 spec", () => {
+    const monorepoRoot = path.join(tempDirectory, "unknown-before-modern-styled-workspace-root");
+    const unknownDirectory = path.join(monorepoRoot, "apps", "a-unknown");
+    const modernDirectory = path.join(monorepoRoot, "apps", "b-modern");
+    fs.mkdirSync(unknownDirectory, { recursive: true });
+    fs.mkdirSync(modernDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({ name: "root", private: true, workspaces: ["apps/*"] }),
+    );
+    fs.writeFileSync(
+      path.join(unknownDirectory, "package.json"),
+      JSON.stringify({
+        name: "unknown",
+        dependencies: { react: "^19.0.0", "styled-components": "workspace:*" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(modernDirectory, "package.json"),
+      JSON.stringify({
+        name: "modern",
+        dependencies: { react: "^19.0.0", "styled-components": "^6.1.0" },
+      }),
+    );
+
+    expect(discoverProject(monorepoRoot).styledComponentsVersion).toBe("workspace:*");
+  });
+
+  it("resolves styled-components catalog specs before merging workspace versions", () => {
+    const monorepoRoot = path.join(tempDirectory, "styled-components-pnpm-catalog");
+    const appDirectory = path.join(monorepoRoot, "apps", "web");
+    fs.mkdirSync(appDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "pnpm-workspace.yaml"),
+      "packages:\n  - apps/*\n\ncatalog:\n  styled-components: ^6.1.0\n",
+    );
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({ name: "root", private: true }),
+    );
+    fs.writeFileSync(
+      path.join(appDirectory, "package.json"),
+      JSON.stringify({
+        name: "web",
+        dependencies: { react: "^19.0.0", "styled-components": "catalog:" },
+      }),
+    );
+
+    expect(discoverProject(monorepoRoot).styledComponentsVersion).toBe("^6.1.0");
+    expect(discoverProject(appDirectory).styledComponentsVersion).toBe("^6.1.0");
+  });
+
+  it("keeps a root styled-components v5 spec over a workspace v6 catalog spec", () => {
+    const monorepoRoot = path.join(tempDirectory, "styled-components-root-v5-catalog-v6");
+    const appDirectory = path.join(monorepoRoot, "apps", "web");
+    fs.mkdirSync(appDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "pnpm-workspace.yaml"),
+      "packages:\n  - apps/*\n\ncatalog:\n  styled-components: ^6.1.0\n",
+    );
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({
+        name: "root",
+        private: true,
+        dependencies: { "styled-components": "^5.3.11" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(appDirectory, "package.json"),
+      JSON.stringify({
+        name: "web",
+        dependencies: { react: "^19.0.0", "styled-components": "catalog:" },
+      }),
+    );
+
+    expect(discoverProject(monorepoRoot).styledComponentsVersion).toBe("^5.3.11");
+  });
+
+  it("uses a workspace v5 catalog spec over a root styled-components v6 spec", () => {
+    const monorepoRoot = path.join(tempDirectory, "styled-components-root-v6-catalog-v5");
+    const appDirectory = path.join(monorepoRoot, "apps", "web");
+    fs.mkdirSync(appDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "pnpm-workspace.yaml"),
+      "packages:\n  - apps/*\n\ncatalog:\n  styled-components: ^5.3.11\n",
+    );
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({
+        name: "root",
+        private: true,
+        dependencies: { "styled-components": "^6.1.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(appDirectory, "package.json"),
+      JSON.stringify({
+        name: "web",
+        dependencies: { react: "^19.0.0", "styled-components": "catalog:" },
+      }),
+    );
+
+    expect(discoverProject(monorepoRoot).styledComponentsVersion).toBe("^5.3.11");
+  });
+
+  it("resolves a named styled-components catalog from the workspace root", () => {
+    const monorepoRoot = path.join(tempDirectory, "styled-components-named-catalog");
+    const appDirectory = path.join(monorepoRoot, "apps", "web");
+    fs.mkdirSync(appDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "pnpm-workspace.yaml"),
+      "packages:\n  - apps/*\n\ncatalogs:\n  legacy:\n    styled-components: ^5.3.11\n",
+    );
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({ name: "root", private: true }),
+    );
+    fs.writeFileSync(
+      path.join(appDirectory, "package.json"),
+      JSON.stringify({
+        name: "web",
+        dependencies: { react: "^19.0.0", "styled-components": "catalog:legacy" },
+      }),
+    );
+
+    expect(discoverProject(monorepoRoot).styledComponentsVersion).toBe("^5.3.11");
+    expect(discoverProject(appDirectory).styledComponentsVersion).toBe("^5.3.11");
+  });
+
+  it("does not classify framework-agnostic query-core as React Query", () => {
+    const projectDirectory = path.join(tempDirectory, "tanstack-query-core-only");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "query-core-library",
+        dependencies: { "@tanstack/query-core": "^5.66.0" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.tanstackQueryVersion).toBeNull();
+    expect(projectInfo.hasTanStackQuery).toBe(false);
+  });
+
+  it("prefers the runtime styled-components spec over a dev-only pin", () => {
+    const projectDirectory = path.join(tempDirectory, "styled-dev-pin");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "styled-dev-pin",
+        dependencies: { react: "^19.0.0", "styled-components": "^6.1.0" },
+        devDependencies: { "styled-components": "^5.3.11" },
+      }),
+    );
+
+    expect(discoverProject(projectDirectory).styledComponentsVersion).toBe("^6.1.0");
   });
 
   it("prefers runtime React dependencies over conflicting devDependencies", () => {
@@ -663,6 +1174,7 @@ describe("discoverProject", () => {
 
     const projectInfo = discoverProject(projectDirectory);
     expect(projectInfo.hasReactCompiler).toBe(false);
+    expect(projectInfo.hasReactCompilerLintPlugin).toBe(false);
   });
 
   it("detects React Compiler when next.config sets reactCompiler to true", () => {
@@ -678,6 +1190,936 @@ describe("discoverProject", () => {
     fs.writeFileSync(
       path.join(projectDirectory, "next.config.ts"),
       "import type { NextConfig } from 'next';\nconst nextConfig: NextConfig = { reactCompiler: true };\nexport default nextConfig;\n",
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.hasReactCompiler).toBe(true);
+  });
+
+  it("detects React Compiler when a config enables it with a runtime condition", () => {
+    const projectDirectory = path.join(tempDirectory, "conditional-react-compiler");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "conditional-react-compiler",
+        dependencies: { next: "^15.0.0", react: "^19.0.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "next.config.ts"),
+      "const isProduction = process.env.NODE_ENV === 'production';\nexport default { experimental: { reactCompiler: isProduction } };\n",
+    );
+
+    expect(discoverProject(projectDirectory).hasReactCompiler).toBe(true);
+  });
+
+  it("detects React Compiler configured through a local build-config helper", () => {
+    const projectDirectory = path.join(tempDirectory, "indirect-react-compiler");
+    const pluginDirectory = path.join(projectDirectory, "build", "plugins");
+    fs.mkdirSync(pluginDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "indirect-react-compiler",
+        dependencies: { react: "^19.0.0" },
+        devDependencies: { "babel-plugin-react-compiler": "^1.0.0", vite: "^7.0.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "vite.config.ts"),
+      "import { createPlugins } from './build/plugins';\nexport default { plugins: createPlugins() };\n",
+    );
+    fs.writeFileSync(
+      path.join(pluginDirectory, "index.ts"),
+      "import { reactCompilerPreset } from '@vitejs/plugin-react';\nexport const createPlugins = () => [reactCompilerPreset()];\n",
+    );
+
+    expect(discoverProject(projectDirectory).hasReactCompiler).toBe(true);
+  });
+
+  it("detects React Compiler configured through a required CommonJS helper", () => {
+    const projectDirectory = path.join(tempDirectory, "required-react-compiler-config");
+    fs.mkdirSync(path.join(projectDirectory, "build"), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({ name: "required-react-compiler-config", dependencies: { react: "^19" } }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "babel.config.cjs"),
+      "module.exports = require('./build/babel-options');\n",
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "build", "babel-options.cjs"),
+      "module.exports = { plugins: ['babel-plugin-react-compiler'] };\n",
+    );
+
+    expect(discoverProject(projectDirectory).hasReactCompiler).toBe(true);
+  });
+
+  it("detects React Compiler inherited through Babel extends", () => {
+    const projectDirectory = path.join(tempDirectory, "extended-react-compiler-config");
+    fs.mkdirSync(path.join(projectDirectory, "build"), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({ name: "extended-react-compiler-config", dependencies: { react: "^19" } }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, ".babelrc.json"),
+      JSON.stringify({ extends: "./build/babel-base.json" }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "build", "babel-base.json"),
+      JSON.stringify({ plugins: ["babel-plugin-react-compiler"] }),
+    );
+
+    expect(discoverProject(projectDirectory).hasReactCompiler).toBe(true);
+  });
+
+  it("does not treat an installed React Compiler transform package as an active transform", () => {
+    const projectDirectory = path.join(tempDirectory, "react-compiler-package-only");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "react-compiler-package-only",
+        dependencies: { react: "^19.0.0" },
+        devDependencies: { "babel-plugin-react-compiler": "^1.0.0" },
+      }),
+    );
+
+    expect(discoverProject(projectDirectory).hasReactCompiler).toBe(false);
+  });
+
+  it("does not treat commented or type-only compiler references as active configuration", () => {
+    const projectDirectory = path.join(tempDirectory, "commented-react-compiler");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "commented-react-compiler",
+        dependencies: { react: "^19.0.0" },
+        devDependencies: { "babel-plugin-react-compiler": "^1.0.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "vite.config.ts"),
+      "import type { CompilerOptions as ReactCompilerOptions } from 'babel-plugin-react-compiler';\ninterface CompilerOptions { reactCompiler: boolean; options: ReactCompilerOptions }\nexport default { plugins: [react()] };\n// babel({ presets: [reactCompilerPreset()] })\n",
+    );
+
+    expect(discoverProject(projectDirectory).hasReactCompiler).toBe(false);
+  });
+
+  it("does not treat an unused React Compiler import as active configuration", () => {
+    const projectDirectory = path.join(tempDirectory, "unused-react-compiler-import");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "unused-react-compiler-import",
+        dependencies: { react: "^19.0.0" },
+        devDependencies: { "babel-plugin-react-compiler": "^1.0.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "vite.config.ts"),
+      "import compiler from 'babel-plugin-react-compiler';\nexport default { plugins: [react()] };\n",
+    );
+
+    expect(discoverProject(projectDirectory).hasReactCompiler).toBe(false);
+  });
+
+  it("does not confuse a shadowed config binding with an imported compiler", () => {
+    const projectDirectory = path.join(tempDirectory, "shadowed-react-compiler-import");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "shadowed-react-compiler-import",
+        dependencies: { react: "^19.0.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "babel.config.ts"),
+      "import compiler from 'babel-plugin-react-compiler';\nconst makeConfig = (compiler) => ({ plugins: [compiler] });\nexport default makeConfig(otherPlugin);\n",
+    );
+
+    expect(discoverProject(projectDirectory).hasReactCompiler).toBe(false);
+  });
+
+  it("does not treat an unused React Compiler option object as active configuration", () => {
+    const projectDirectory = path.join(tempDirectory, "unused-react-compiler-options");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "unused-react-compiler-options",
+        dependencies: { react: "^19.0.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "next.config.ts"),
+      "const unusedOptions = { reactCompiler: true };\nexport default { images: { unoptimized: true } };\n",
+    );
+
+    expect(discoverProject(projectDirectory).hasReactCompiler).toBe(false);
+  });
+
+  it("does not inspect an unused local build-config helper", () => {
+    const projectDirectory = path.join(tempDirectory, "unused-react-compiler-helper");
+    fs.mkdirSync(path.join(projectDirectory, "build"), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "unused-react-compiler-helper",
+        dependencies: { react: "^19.0.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "vite.config.ts"),
+      "import { compilerPlugins } from './build/compiler-plugins';\nexport default { plugins: [react()] };\n",
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "build", "compiler-plugins.ts"),
+      "export const compilerPlugins = ['babel-plugin-react-compiler'];\n",
+    );
+
+    expect(discoverProject(projectDirectory).hasReactCompiler).toBe(false);
+  });
+
+  it("detects an imported React Compiler transform used in a Babel plugin array", () => {
+    const projectDirectory = path.join(tempDirectory, "imported-react-compiler-transform");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "imported-react-compiler-transform",
+        dependencies: { react: "^19.0.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "babel.config.ts"),
+      "import compiler from 'babel-plugin-react-compiler';\nexport default { plugins: [compiler] };\n",
+    );
+
+    expect(discoverProject(projectDirectory).hasReactCompiler).toBe(true);
+  });
+
+  const reactCompilerDetectionCases: ReactCompilerDetectionCase[] = [
+    {
+      name: "property-key-collision",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; export default { plugins: [{ compiler: other }] };",
+      expected: false,
+    },
+    {
+      name: "member-name-collision",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; export default { plugins: [object.compiler] };",
+      expected: false,
+    },
+    {
+      name: "named-function-collision",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; export default { plugins: [function compiler() {}] };",
+      expected: false,
+    },
+    {
+      name: "disabled-shorthand",
+      config: "const reactCompiler = false; export default { reactCompiler };",
+      expected: false,
+    },
+    {
+      name: "null-shorthand",
+      config: "const reactCompiler = null; export default { reactCompiler };",
+      expected: false,
+    },
+    {
+      name: "undefined-shorthand",
+      config: "const reactCompiler = undefined; export default { reactCompiler };",
+      expected: false,
+    },
+    {
+      name: "unreachable-plugin-array",
+      config:
+        "const unused = { plugins: ['babel-plugin-react-compiler'] }; export default { images: {} };",
+      expected: false,
+    },
+    {
+      name: "plugin-option-string",
+      config:
+        "export default { plugins: [['other-plugin', { name: 'babel-plugin-react-compiler' }]] };",
+      expected: false,
+    },
+    {
+      name: "compiler-after-another-plugin",
+      config: "export default { plugins: ['other-plugin', 'babel-plugin-react-compiler'] };",
+      expected: true,
+    },
+    {
+      name: "compiler-after-another-preset",
+      config: "export default { presets: ['other-preset', 'babel-plugin-react-compiler'] };",
+      expected: true,
+    },
+    {
+      name: "shadowed-require",
+      config:
+        "const require = () => other; module.exports = { plugins: [require('babel-plugin-react-compiler')] };",
+      expected: false,
+    },
+    {
+      name: "shadowed-vite-namespace",
+      config:
+        "import * as viteReact from '@vitejs/plugin-react'; const make = (viteReact) => ({ plugins: [viteReact.reactCompilerPreset()] }); export default make(other);",
+      expected: false,
+    },
+    {
+      name: "same-name-forwarded-method-receiver",
+      config:
+        "const wrapper = { run(config) { return config.plugin(); } }; const config = {}; export default wrapper.run(config);",
+      expected: false,
+    },
+    {
+      name: "shadowed-function-declaration",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; const makeConfig = () => { function compiler() {} return { plugins: [compiler] }; }; export default makeConfig();",
+      expected: false,
+    },
+    {
+      name: "shadowed-class-declaration",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; const makeConfig = () => { class compiler {} return { plugins: [compiler] }; }; export default makeConfig();",
+      expected: false,
+    },
+    {
+      name: "hoisted-shadowed-function-declaration",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; const makeConfig = () => { return { plugins: [compiler] }; function compiler() {} }; export default makeConfig();",
+      expected: false,
+    },
+    {
+      name: "destructured-shadowed-compiler-binding",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; const makeConfig = () => { const { compiler } = other; return { plugins: [compiler] }; }; export default makeConfig();",
+      expected: false,
+    },
+    {
+      name: "selected-helper-export",
+      config: "import { ordinary } from './helper'; export default { plugins: [ordinary] };",
+      helper:
+        "export const ordinary = () => {}; export const unused = { plugins: ['babel-plugin-react-compiler'] };",
+      expected: false,
+    },
+    {
+      name: "selected-helper-re-export",
+      config: "export { ordinary as default } from './helper';",
+      helper:
+        "export const ordinary = {}; export const unused = { plugins: ['babel-plugin-react-compiler'] };",
+      expected: false,
+    },
+    {
+      name: "selected-compiler-re-export",
+      config: "export { compiled as default } from './helper';",
+      helper:
+        "export const ordinary = {}; export const compiled = { plugins: ['babel-plugin-react-compiler'] };",
+      expected: true,
+    },
+    {
+      name: "default-export-specifier",
+      config: "const config = { reactCompiler: true }; export { config as default };",
+      expected: true,
+    },
+    {
+      name: "default-function-config",
+      config: "export default function nextConfig() { return { reactCompiler: true }; }",
+      expected: true,
+    },
+    {
+      name: "factored-import-plugin-array",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; const plugins = [compiler]; export default { plugins };",
+      expected: true,
+    },
+    {
+      name: "factored-string-plugin-array",
+      config: "const plugins = ['babel-plugin-react-compiler']; export default { plugins };",
+      expected: true,
+    },
+    {
+      name: "selected-helper-plugin-array",
+      config: "import { plugins } from './helper'; export default { plugins };",
+      helper: "export const plugins = ['babel-plugin-react-compiler'];",
+      expected: true,
+    },
+    {
+      name: "destructured-compiler-require",
+      config:
+        "const { default: compiler } = require('babel-plugin-react-compiler'); module.exports = { plugins: [compiler] };",
+      expected: true,
+    },
+    {
+      name: "compiler-require-default",
+      config:
+        "const compiler = require('babel-plugin-react-compiler').default; module.exports = { plugins: [compiler] };",
+      expected: true,
+    },
+    {
+      name: "destructured-vite-preset-require",
+      config:
+        "const { reactCompilerPreset } = require('@vitejs/plugin-react'); module.exports = { plugins: [reactCompilerPreset()] };",
+      expected: true,
+    },
+    {
+      name: "vite-namespace-require",
+      config:
+        "const viteReact = require('@vitejs/plugin-react'); module.exports = { plugins: [viteReact.reactCompilerPreset()] };",
+      expected: true,
+    },
+    {
+      name: "computed-react-compiler-property",
+      config: "export default { ['reactCompiler']: true };",
+      expected: true,
+    },
+    {
+      name: "computed-vite-preset-property",
+      config:
+        "import * as viteReact from '@vitejs/plugin-react'; export default { plugins: [viteReact['reactCompilerPreset']()] };",
+      expected: true,
+    },
+    {
+      name: "destructured-local-require",
+      config: "const { config } = require('./helper'); module.exports = config;",
+      helper: "exports.config = { plugins: ['babel-plugin-react-compiler'] };",
+      expected: true,
+    },
+    {
+      name: "local-require-member",
+      config: "module.exports = require('./helper').config;",
+      helper: "exports.config = { plugins: ['babel-plugin-react-compiler'] };",
+      expected: true,
+    },
+    {
+      name: "local-require-factory",
+      config: "const makeConfig = require('./helper'); module.exports = makeConfig();",
+      helper: "module.exports = () => ({ plugins: ['babel-plugin-react-compiler'] });",
+      expected: true,
+    },
+    {
+      name: "later-disabled-flag",
+      config: "export default { reactCompiler: true, reactCompiler: false };",
+      expected: false,
+    },
+    {
+      name: "later-disabled-spread-flag",
+      config:
+        "const enabled = { reactCompiler: true }; export default { ...enabled, reactCompiler: false };",
+      expected: false,
+    },
+    {
+      name: "statically-disabled-plugin",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; export default { plugins: [false && compiler] };",
+      expected: false,
+    },
+    {
+      name: "non-default-compiler-package-export",
+      config:
+        "import { parseOptions } from 'babel-plugin-react-compiler'; export default { plugins: [parseOptions] };",
+      expected: false,
+    },
+    {
+      name: "assigned-react-compiler-flag",
+      config: "const config = {}; config.reactCompiler = true; export default config;",
+      expected: true,
+    },
+    {
+      name: "function-local-assigned-react-compiler-flag",
+      config:
+        "export default () => { const config = {}; config.reactCompiler = true; return config; };",
+      expected: true,
+    },
+    {
+      name: "function-local-assigned-compiler-plugin",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; export default () => { const config = {}; config.plugins = [compiler]; return config; };",
+      expected: true,
+    },
+    {
+      name: "later-empty-plugin-assignment",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; const config = { plugins: [compiler] }; config.plugins = []; export default config;",
+      expected: false,
+    },
+    {
+      name: "commonjs-assigned-react-compiler-flag",
+      config: "module.exports = {}; module.exports.reactCompiler = true;",
+      expected: true,
+    },
+    {
+      name: "later-commonjs-root-assignment",
+      config:
+        "module.exports.plugins = ['babel-plugin-react-compiler']; module.exports = { plugins: [] };",
+      expected: false,
+    },
+    {
+      name: "later-commonjs-member-assignment",
+      config:
+        "module.exports = { plugins: [] }; module.exports.plugins = ['babel-plugin-react-compiler'];",
+      expected: true,
+    },
+    {
+      name: "spread-snapshot-before-disabling-write",
+      config:
+        "const config = {}; config.reactCompiler = true; const exported = { ...config }; config.reactCompiler = false; export default exported;",
+      expected: true,
+    },
+    {
+      name: "spread-snapshot-before-enabling-write",
+      config:
+        "const config = {}; const exported = { ...config }; config.reactCompiler = true; export default exported;",
+      expected: false,
+    },
+    {
+      name: "export-spread-before-disabling-write",
+      config:
+        "const config = {}; config.reactCompiler = true; export default { ...config }; config.reactCompiler = false;",
+      expected: true,
+    },
+    {
+      name: "export-spread-before-enabling-write",
+      config: "const config = {}; export default { ...config }; config.reactCompiler = true;",
+      expected: false,
+    },
+    {
+      name: "later-plugin-override",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; export default { plugins: [compiler], plugins: [] };",
+      expected: false,
+    },
+    {
+      name: "later-plugin-spread-override",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; const compilerConfig = { plugins: [compiler] }; export default { ...compilerConfig, plugins: [] };",
+      expected: false,
+    },
+    {
+      name: "later-irrelevant-known-spread",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; const environmentConfig = { mode: 'production' }; export default { plugins: [compiler], ...environmentConfig };",
+      expected: true,
+    },
+    {
+      name: "later-known-spread-plugin-override",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; const disabledConfig = { plugins: [] }; export default { plugins: [compiler], ...disabledConfig };",
+      expected: false,
+    },
+    {
+      name: "false-conditional-plugin",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; export default { plugins: [false ? compiler : other] };",
+      expected: false,
+    },
+    {
+      name: "zero-conditional-plugin",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; export default { plugins: [0 ? compiler : other] };",
+      expected: false,
+    },
+    {
+      name: "empty-string-and-plugin",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; export default { plugins: ['' && compiler] };",
+      expected: false,
+    },
+    {
+      name: "nullish-plugin-fallback",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; export default { plugins: [null ?? compiler] };",
+      expected: true,
+    },
+    {
+      name: "zero-non-nullish-plugin-fallback",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; export default { plugins: [0 ?? compiler] };",
+      expected: false,
+    },
+    {
+      name: "empty-string-non-nullish-plugin-fallback",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; export default { plugins: ['' ?? compiler] };",
+      expected: false,
+    },
+    {
+      name: "zero-non-nullish-react-compiler-flag",
+      config: "export default { reactCompiler: 0 ?? true };",
+      expected: false,
+    },
+    {
+      name: "nullish-react-compiler-flag-fallback",
+      config: "export default { reactCompiler: null ?? true };",
+      expected: true,
+    },
+    {
+      name: "false-or-plugin",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; export default { plugins: [false || compiler] };",
+      expected: true,
+    },
+    {
+      name: "plugin-option-call-string",
+      config: "export default { plugins: [otherPlugin({ name: 'babel-plugin-react-compiler' })] };",
+      expected: false,
+    },
+    {
+      name: "selected-local-object-member",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; const choices = { selected: compiler }; export default { plugins: [choices.selected] };",
+      expected: true,
+    },
+    {
+      name: "unselected-local-object-member",
+      config:
+        "const choices = { selected: other, unused: { plugins: ['babel-plugin-react-compiler'] } }; export default { plugins: [choices.selected] };",
+      expected: false,
+    },
+    {
+      name: "imported-helper-disabled-argument",
+      config: "import { make } from './helper'; export default make(false);",
+      helper: "export const make = (reactCompiler) => ({ reactCompiler });",
+      expected: false,
+    },
+    {
+      name: "array-spread-plugin",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; const compilerPlugins = [compiler]; export default { plugins: [...compilerPlugins] };",
+      expected: true,
+    },
+    {
+      name: "computed-assigned-plugins",
+      config:
+        "import compiler from 'babel-plugin-react-compiler'; const config = {}; config['plugins'] = [compiler]; export default config;",
+      expected: true,
+    },
+    {
+      name: "commonjs-exports-plugins",
+      config: "exports.plugins = ['babel-plugin-react-compiler'];",
+      expected: true,
+    },
+    {
+      name: "commonjs-computed-plugins",
+      config: "module.exports['plugins'] = ['babel-plugin-react-compiler'];",
+      expected: true,
+    },
+    {
+      name: "namespace-helper-disabled-argument",
+      config: "import * as helper from './helper'; export default helper.make(false);",
+      helper: "export const make = (reactCompiler) => ({ reactCompiler });",
+      expected: false,
+    },
+    {
+      name: "namespace-helper-enabled-argument",
+      config: "import * as helper from './helper'; export default helper.make(true);",
+      helper: "export const make = (reactCompiler) => ({ reactCompiler });",
+      expected: true,
+    },
+    {
+      name: "local-member-helper-disabled-argument",
+      config:
+        "const helper = { make: (reactCompiler) => ({ reactCompiler }) }; export default helper.make(false);",
+      expected: false,
+    },
+    {
+      name: "local-member-helper-enabled-argument",
+      config:
+        "const helper = { make: (reactCompiler) => ({ reactCompiler }) }; export default helper.make(true);",
+      expected: true,
+    },
+    {
+      name: "local-method-helper-disabled-argument",
+      config:
+        "const helper = { make(reactCompiler) { return { reactCompiler }; } }; export default helper.make(false);",
+      expected: false,
+    },
+    {
+      name: "local-method-helper-enabled-argument",
+      config:
+        "const helper = { make(reactCompiler) { return { reactCompiler }; } }; export default helper.make(true);",
+      expected: true,
+    },
+    {
+      name: "commonjs-member-helper-disabled-argument",
+      config: "module.exports = require('./helper').make(false);",
+      helper: "exports.make = (reactCompiler) => ({ reactCompiler });",
+      expected: false,
+    },
+    {
+      name: "commonjs-member-helper-enabled-argument",
+      config: "module.exports = require('./helper').make(true);",
+      helper: "exports.make = (reactCompiler) => ({ reactCompiler });",
+      expected: true,
+    },
+  ];
+
+  it.each(reactCompilerDetectionCases)(
+    "resolves only the selected React Compiler config value graph: $name",
+    (detectionCase) => {
+      const projectDirectory = path.join(tempDirectory, detectionCase.name);
+      fs.mkdirSync(projectDirectory, { recursive: true });
+      fs.writeFileSync(
+        path.join(projectDirectory, "package.json"),
+        JSON.stringify({ name: detectionCase.name, dependencies: { react: "^19.0.0" } }),
+      );
+      fs.writeFileSync(path.join(projectDirectory, "vite.config.ts"), detectionCase.config);
+      if (detectionCase.helper) {
+        fs.writeFileSync(path.join(projectDirectory, "helper.ts"), detectionCase.helper);
+      }
+
+      expect(discoverProject(projectDirectory).hasReactCompiler).toBe(detectionCase.expected);
+    },
+  );
+
+  it("resolves an extensionless CommonJS React Compiler config from JSON", () => {
+    const projectDirectory = path.join(tempDirectory, "json-react-compiler-helper");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({ name: "json-react-compiler-helper", dependencies: { react: "^19.0.0" } }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "babel.config.cjs"),
+      "module.exports = require('./helper');",
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "helper.json"),
+      JSON.stringify({ plugins: ["babel-plugin-react-compiler"] }),
+    );
+
+    expect(discoverProject(projectDirectory).hasReactCompiler).toBe(true);
+  });
+
+  it("detects React Compiler configured through the package.json Babel field", () => {
+    const projectDirectory = path.join(tempDirectory, "react-compiler-package-babel-config");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "react-compiler-package-babel-config",
+        dependencies: { react: "^19.0.0" },
+        devDependencies: { "babel-plugin-react-compiler": "^1.0.0" },
+        babel: { plugins: ["other-plugin", "babel-plugin-react-compiler"] },
+      }),
+    );
+
+    expect(discoverProject(projectDirectory).hasReactCompiler).toBe(true);
+  });
+
+  it("does not read a compiler-looking Babel tuple option from package.json", () => {
+    const projectDirectory = path.join(tempDirectory, "react-compiler-package-babel-tuple-option");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "react-compiler-package-babel-tuple-option",
+        dependencies: { react: "^19.0.0" },
+        babel: {
+          plugins: [["other-plugin", { name: "babel-plugin-react-compiler" }]],
+        },
+      }),
+    );
+
+    expect(discoverProject(projectDirectory).hasReactCompiler).toBe(false);
+  });
+
+  it("inherits React Compiler activation from an ancestor build config", () => {
+    const workspaceDirectory = path.join(tempDirectory, "react-compiler-config-workspace");
+    const projectDirectory = path.join(workspaceDirectory, "packages", "app");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(workspaceDirectory, "package.json"),
+      JSON.stringify({
+        name: "react-compiler-config-workspace",
+        private: true,
+        workspaces: ["packages/*"],
+        devDependencies: { "babel-plugin-react-compiler": "^1.0.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(workspaceDirectory, "babel.config.js"),
+      "module.exports = { plugins: ['babel-plugin-react-compiler'] };\n",
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({ name: "app", dependencies: { react: "^19.0.0" } }),
+    );
+
+    expect(discoverProject(projectDirectory).hasReactCompiler).toBe(true);
+  });
+
+  it("does not inherit React Compiler activation from an ancestor app config", () => {
+    const workspaceDirectory = path.join(tempDirectory, "react-compiler-app-config-workspace");
+    const projectDirectory = path.join(workspaceDirectory, "packages", "app");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(workspaceDirectory, "package.json"),
+      JSON.stringify({
+        name: "react-compiler-app-config-workspace",
+        private: true,
+        workspaces: ["packages/*"],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(workspaceDirectory, "vite.config.ts"),
+      "export default { plugins: ['babel-plugin-react-compiler'] };",
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({ name: "app", dependencies: { react: "^19.0.0" } }),
+    );
+
+    expect(discoverProject(projectDirectory).hasReactCompiler).toBe(false);
+  });
+
+  it("does not treat the React Compiler ESLint plugin as a build transform", () => {
+    const projectDirectory = path.join(tempDirectory, "react-compiler-eslint-only");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "react-compiler-eslint-only",
+        dependencies: { react: "^19.0.0" },
+        devDependencies: { "eslint-plugin-react-compiler": "^19.0.0-beta" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.hasReactCompiler).toBe(false);
+    expect(projectInfo.hasReactCompilerLintPlugin).toBe(true);
+  });
+
+  it("does not treat a React Compiler ESLint plugin reference in build config as a transform", () => {
+    const projectDirectory = path.join(tempDirectory, "react-compiler-eslint-config-only");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "react-compiler-eslint-config-only",
+        dependencies: { react: "^19.0.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "vite.config.ts"),
+      "const lintPlugin = 'eslint-plugin-react-compiler';\nexport default { lintPlugin };\n",
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.hasReactCompiler).toBe(false);
+    expect(projectInfo.hasReactCompilerLintPlugin).toBe(false);
+  });
+
+  it("does not inherit React Compiler capability from ancestor lint tooling", () => {
+    const workspaceDirectory = path.join(tempDirectory, "react-compiler-eslint-workspace");
+    const projectDirectory = path.join(workspaceDirectory, "packages", "app");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(workspaceDirectory, "package.json"),
+      JSON.stringify({
+        name: "react-compiler-eslint-workspace",
+        private: true,
+        devDependencies: { "eslint-plugin-react-compiler": "^19.0.0-beta" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "app",
+        dependencies: { react: "^19.0.0" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.hasReactCompiler).toBe(false);
+    expect(projectInfo.hasReactCompilerLintPlugin).toBe(true);
+  });
+
+  it("detects a Babel Compiler transform alongside the ESLint plugin", () => {
+    const projectDirectory = path.join(tempDirectory, "react-compiler-eslint-and-babel");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "react-compiler-eslint-and-babel",
+        dependencies: { react: "^19.0.0" },
+        devDependencies: { "eslint-plugin-react-compiler": "^19.0.0-beta" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "babel.config.js"),
+      "module.exports = { plugins: ['babel-plugin-react-compiler'] };\n",
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.hasReactCompiler).toBe(true);
+    expect(projectInfo.hasReactCompilerLintPlugin).toBe(true);
+  });
+
+  it("detects the Vite 6 React Compiler preset", () => {
+    const projectDirectory = path.join(tempDirectory, "vite-react-compiler-preset");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "vite-react-compiler-preset",
+        dependencies: { react: "^19.0.0" },
+        devDependencies: {
+          "@rolldown/plugin-babel": "^0.2.0",
+          "@vitejs/plugin-react": "^6.0.0",
+        },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "vite.config.ts"),
+      "import react, { reactCompilerPreset } from '@vitejs/plugin-react';\nimport babel from '@rolldown/plugin-babel';\nexport default { plugins: [react(), babel({ presets: [reactCompilerPreset()] })] };\n",
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.hasReactCompiler).toBe(true);
+  });
+
+  it("detects the Rsbuild React Compiler transform", () => {
+    const projectDirectory = path.join(tempDirectory, "rsbuild-react-compiler");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "rsbuild-react-compiler",
+        dependencies: { react: "^19.0.0" },
+        devDependencies: { "@rsbuild/plugin-react": "^2.1.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "rsbuild.config.ts"),
+      "import { pluginReact } from '@rsbuild/plugin-react';\nexport default { plugins: [pluginReact({ reactCompiler: true })] };\n",
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.hasReactCompiler).toBe(true);
+  });
+
+  it("detects the Rspack React Compiler transform", () => {
+    const projectDirectory = path.join(tempDirectory, "rspack-react-compiler");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "rspack-react-compiler",
+        dependencies: { react: "^19.0.0" },
+        devDependencies: { "@rspack/core": "^2.1.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "rspack.config.mjs"),
+      "export default { module: { rules: [{ use: { loader: 'builtin:swc-loader', options: { jsc: { transform: { reactCompiler: true } } } } }] } };\n",
     );
 
     const projectInfo = discoverProject(projectDirectory);
@@ -790,6 +2232,38 @@ describe("listWorkspacePackages", () => {
     expect(projectInfo.expoVersion, "expo dependency still flags the project").toBe("~51.0.0");
   });
 
+  it("classifies a Remix app that ships Vite as `remix`, not `vite`", () => {
+    const projectDirectory = path.join(tempDirectory, "remix-with-vite");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "remix-with-vite",
+        dependencies: { "@remix-run/react": "^2.9.0", react: "^18.2.0" },
+        devDependencies: { vite: "^5.1.0" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.framework, "the framework package outranks its bundler").toBe("remix");
+  });
+
+  it("classifies a Gatsby app that also lists Vite as `gatsby`, not `vite`", () => {
+    const projectDirectory = path.join(tempDirectory, "gatsby-with-vite");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "gatsby-with-vite",
+        dependencies: { gatsby: "^5.13.0", react: "^18.2.0" },
+        devDependencies: { vite: "^5.1.0" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.framework, "the framework package outranks its bundler").toBe("gatsby");
+  });
+
   it("flags a web-rooted monorepo with an Expo workspace as an Expo project", () => {
     const rootDirectory = path.join(tempDirectory, "expo-workspace-monorepo");
     const mobileDirectory = path.join(rootDirectory, "apps", "mobile");
@@ -899,6 +2373,147 @@ describe("listWorkspacePackages", () => {
   });
 });
 
+describe("discoverProject — node-resolution React fallback", () => {
+  const writeInstalledReact = (rootDirectory: string, version: string): void => {
+    const reactDirectory = path.join(rootDirectory, "node_modules", "react");
+    fs.mkdirSync(reactDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(reactDirectory, "package.json"),
+      JSON.stringify({ name: "react", version, main: "index.js" }),
+    );
+    fs.writeFileSync(path.join(reactDirectory, "index.js"), "module.exports = {};\n");
+  };
+
+  it("resolves the installed React version when the declaration is version-less", () => {
+    const projectDirectory = path.join(tempDirectory, "react-workspace-protocol-installed");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({ name: "widget", dependencies: { react: "workspace:*" } }),
+    );
+    writeInstalledReact(projectDirectory, "19.1.0");
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.reactVersion).toBe("19.1.0");
+    expect(projectInfo.reactMajorVersion).toBe(19);
+  });
+
+  it("detects React hoisted into an enclosing node_modules with no declaration", () => {
+    const repositoryRoot = path.join(tempDirectory, "hoisted-react-repo");
+    const packageDirectory = path.join(repositoryRoot, "packages", "widget");
+    fs.mkdirSync(path.join(repositoryRoot, ".git"), { recursive: true });
+    fs.mkdirSync(packageDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(packageDirectory, "package.json"),
+      JSON.stringify({ name: "widget" }),
+    );
+    writeInstalledReact(repositoryRoot, "18.3.1");
+
+    const projectInfo = discoverProject(packageDirectory);
+    expect(projectInfo.reactVersion).toBe("18.3.1");
+    expect(projectInfo.reactMajorVersion).toBe(18);
+  });
+
+  it("does not adopt a React installed outside the enclosing repo boundary", () => {
+    const outsideDirectory = path.join(tempDirectory, "containment-outside");
+    const repositoryRoot = path.join(outsideDirectory, "repo");
+    fs.mkdirSync(path.join(repositoryRoot, ".git"), { recursive: true });
+    fs.writeFileSync(path.join(repositoryRoot, "package.json"), JSON.stringify({ name: "repo" }));
+    // React lives one level ABOVE the git root, so the guard rejects it.
+    writeInstalledReact(outsideDirectory, "18.0.0");
+
+    const projectInfo = discoverProject(repositoryRoot);
+    expect(projectInfo.reactVersion).toBeNull();
+    expect(projectInfo.reactMajorVersion).toBeNull();
+  });
+
+  it("leaves a parseable peer range untouched even when a different React is installed", () => {
+    const projectDirectory = path.join(tempDirectory, "peer-range-installed");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "component-lib",
+        peerDependencies: { react: "^18.0.0 || ^19.0.0" },
+      }),
+    );
+    writeInstalledReact(projectDirectory, "19.5.0");
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.reactVersion).toBe("^18.0.0 || ^19.0.0");
+    expect(projectInfo.reactMajorVersion).toBe(18);
+  });
+
+  it("does not override a concrete declared version with a different install", () => {
+    const projectDirectory = path.join(tempDirectory, "concrete-not-overridden");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({ name: "app", dependencies: { react: "18.2.0" } }),
+    );
+    writeInstalledReact(projectDirectory, "19.9.9");
+
+    // The declared concrete version parses to a major, so the fallback stays out.
+    expect(discoverProject(projectDirectory).reactVersion).toBe("18.2.0");
+  });
+
+  it("detects React when the project's node_modules is symlinked outside the repo", () => {
+    // Docker-volume / shared-store shape: node_modules is a symlink to a
+    // directory outside the working tree, but it is still the project's install.
+    const storeDirectory = path.join(tempDirectory, "symlink-store");
+    const reactInStore = path.join(storeDirectory, "react");
+    fs.mkdirSync(reactInStore, { recursive: true });
+    fs.writeFileSync(
+      path.join(reactInStore, "package.json"),
+      JSON.stringify({ name: "react", version: "19.0.0" }),
+    );
+    const repositoryRoot = path.join(tempDirectory, "symlink-repo");
+    fs.mkdirSync(path.join(repositoryRoot, ".git"), { recursive: true });
+    fs.writeFileSync(
+      path.join(repositoryRoot, "package.json"),
+      JSON.stringify({ name: "repo", dependencies: { react: "*" } }),
+    );
+    fs.symlinkSync(storeDirectory, path.join(repositoryRoot, "node_modules"));
+
+    expect(discoverProject(repositoryRoot).reactVersion).toBe("19.0.0");
+  });
+
+  it("does not walk to a global node_modules when the scan tree has no boundary", () => {
+    // No git root and no workspace marker: the search floors at the scanned
+    // package, so a React hoisted above it isn't adopted.
+    const parentDirectory = path.join(tempDirectory, "no-boundary-parent");
+    fs.mkdirSync(parentDirectory, { recursive: true });
+    writeInstalledReact(parentDirectory, "18.0.0");
+    const packageDirectory = path.join(parentDirectory, "pkg");
+    fs.mkdirSync(packageDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(packageDirectory, "package.json"),
+      JSON.stringify({ name: "pkg", dependencies: { react: "*" } }),
+    );
+
+    // The fallback fires (`*` has no major) but floors at the package, so the
+    // hoisted `18.0.0` is not adopted — the declared `*` is left in place.
+    const projectInfo = discoverProject(packageDirectory);
+    expect(projectInfo.reactVersion).toBe("*");
+    expect(projectInfo.reactMajorVersion).toBeNull();
+  });
+
+  it("ignores an installed React whose package.json has no usable version", () => {
+    const projectDirectory = path.join(tempDirectory, "installed-no-version");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({ name: "app", dependencies: { react: "*" } }),
+    );
+    const reactDirectory = path.join(projectDirectory, "node_modules", "react");
+    fs.mkdirSync(reactDirectory, { recursive: true });
+    fs.writeFileSync(path.join(reactDirectory, "package.json"), JSON.stringify({ name: "react" }));
+
+    // `react: "*"` parses to no major and the install has no version → stays as-is.
+    expect(discoverProject(projectDirectory).reactVersion).toBe("*");
+  });
+});
+
 const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "react-doctor-discover-test-"));
 
 afterAll(() => {
@@ -950,6 +2565,40 @@ describe("discoverProject without a package.json", () => {
     const projectInfo = discoverProject(subdirectory);
     expect(projectInfo.reactVersion).toBe("^19.0.0");
     expect(projectInfo.rootDirectory).toBe(subdirectory);
+  });
+
+  it("inherits React detection from a plain (non-monorepo) enclosing app root", () => {
+    const appRoot = path.join(tempDirectory, "plain-react-app");
+    const subdirectory = path.join(appRoot, "src", "components");
+    fs.mkdirSync(subdirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(appRoot, "package.json"),
+      JSON.stringify({ name: "plain-react-app", dependencies: { react: "^19.0.0" } }),
+    );
+    fs.writeFileSync(path.join(subdirectory, "button.tsx"), "export const ok = true;\n");
+
+    // `src/components` has no package.json and the app is not a workspace root,
+    // so the nearest-ancestor walk adopts the app root to keep React on.
+    const projectInfo = discoverProject(subdirectory);
+    expect(projectInfo.reactVersion).toBe("^19.0.0");
+    expect(projectInfo.rootDirectory).toBe(subdirectory);
+  });
+
+  it("does not escape a boundary scan directory to an ancestor package.json", () => {
+    const outsideDirectory = path.join(tempDirectory, "boundary-escape-outside");
+    const repositoryRoot = path.join(outsideDirectory, "repo");
+    fs.mkdirSync(path.join(repositoryRoot, ".git"), { recursive: true });
+    // An unrelated React package.json ABOVE the repo boundary.
+    fs.writeFileSync(
+      path.join(outsideDirectory, "package.json"),
+      JSON.stringify({ name: "outside", dependencies: { react: "^19.0.0" } }),
+    );
+    // The repo root is a git boundary with no package.json of its own, just source.
+    fs.writeFileSync(path.join(repositoryRoot, "index.ts"), "export const ok = true;\n");
+
+    const projectInfo = discoverProject(repositoryRoot);
+    expect(projectInfo.reactVersion).toBeNull();
+    expect(projectInfo.rootDirectory).toBe(repositoryRoot);
   });
 
   it("throws PackageJsonNotFoundError for an empty directory with nothing to scan", () => {
@@ -1138,6 +2787,396 @@ describe("discoverReactSubprojects", () => {
     const packages = discoverReactSubprojects(rootDirectory);
     expect(packages).toHaveLength(1);
     expect(packages[0].name).toBe("my-app");
+  });
+});
+
+describe("discoverProject — React Three Fiber", () => {
+  it("detects React Three Fiber from the project manifest", () => {
+    const projectDirectory = path.join(tempDirectory, "r3f-project");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "r3f-project",
+        dependencies: { react: "^19.0.0", "@react-three/fiber": "^9.0.0" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.hasThree).toBe(true);
+    expect(projectInfo.hasReactThreeFiber).toBe(true);
+    expect(projectInfo.reactThreeFiberVersion).toBe("^9.0.0");
+    expect(projectInfo.reactThreeFiberMajorVersion).toBe(9);
+  });
+
+  it("uses a supported Fiber peer floor instead of a newer dev version", () => {
+    const projectDirectory = path.join(tempDirectory, "r3f-peer-floor");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "r3f-peer-floor",
+        dependencies: { react: "^19.0.0" },
+        peerDependencies: { "@react-three/fiber": "^9.0.0" },
+        devDependencies: { "@react-three/fiber": "^10.0.0" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.reactThreeFiberVersion).toBe("^9.0.0");
+    expect(projectInfo.reactThreeFiberMajorVersion).toBe(9);
+  });
+
+  it("resolves a catalog-backed Fiber peer floor before a dev version", () => {
+    const projectDirectory = path.join(tempDirectory, "r3f-catalog-peer-floor");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "pnpm-workspace.yaml"),
+      'catalogs:\n  stable:\n    "@react-three/fiber": ^9.0.0\n  next:\n    "@react-three/fiber": ^10.0.0\n',
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "r3f-catalog-peer-floor",
+        dependencies: { react: "^19.0.0" },
+        peerDependencies: { "@react-three/fiber": "catalog:stable" },
+        devDependencies: { "@react-three/fiber": "catalog:next" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.reactThreeFiberVersion).toBe("^9.0.0");
+    expect(projectInfo.reactThreeFiberMajorVersion).toBe(9);
+  });
+
+  it("uses an optional Fiber runtime version instead of a newer dev version", () => {
+    const projectDirectory = path.join(tempDirectory, "r3f-optional-runtime");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "r3f-optional-runtime",
+        dependencies: { react: "^19.0.0" },
+        optionalDependencies: { "@react-three/fiber": "^9.0.0" },
+        devDependencies: { "@react-three/fiber": "^10.0.0" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.reactThreeFiberVersion).toBe("^9.0.0");
+    expect(projectInfo.reactThreeFiberMajorVersion).toBe(9);
+  });
+
+  it("resolves a workspace Fiber peer catalog before a dev catalog", () => {
+    const projectDirectory = path.join(tempDirectory, "r3f-workspace-catalog-peer-floor");
+    const sceneDirectory = path.join(projectDirectory, "packages", "scene");
+    fs.mkdirSync(sceneDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "pnpm-workspace.yaml"),
+      'packages:\n  - "packages/*"\ncatalogs:\n  stable:\n    "@react-three/fiber": ^9.0.0\n  next:\n    "@react-three/fiber": ^10.0.0\n',
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "r3f-workspace-catalog-peer-floor",
+        private: true,
+        dependencies: { react: "^19.0.0" },
+        workspaces: ["packages/*"],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(sceneDirectory, "package.json"),
+      JSON.stringify({
+        name: "scene",
+        peerDependencies: { "@react-three/fiber": "catalog:stable" },
+        devDependencies: { "@react-three/fiber": "catalog:next" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.reactThreeFiberVersion).toBe("^9.0.0");
+    expect(projectInfo.reactThreeFiberMajorVersion).toBe(9);
+  });
+
+  it("detects the R3F ecosystem from workspace manifests", () => {
+    const projectDirectory = path.join(tempDirectory, "r3f-workspace");
+    const sceneDirectory = path.join(projectDirectory, "packages", "scene");
+    fs.mkdirSync(sceneDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "r3f-workspace",
+        private: true,
+        dependencies: { react: "^19.0.0" },
+        workspaces: ["packages/*"],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(sceneDirectory, "package.json"),
+      JSON.stringify({ name: "scene", dependencies: { "@react-three/drei": "^10.0.0" } }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.hasThree).toBe(true);
+    expect(projectInfo.hasReactThreeFiber).toBe(true);
+    expect(projectInfo.reactThreeFiberVersion).toBeNull();
+    expect(projectInfo.reactThreeFiberMajorVersion).toBeNull();
+  });
+
+  it("detects plain Three.js without inventing a Fiber version", () => {
+    const projectDirectory = path.join(tempDirectory, "plain-three-project");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "scene",
+        dependencies: { react: "^19.0.0", three: "^0.180.0" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.hasThree).toBe(true);
+    expect(projectInfo.hasReactThreeFiber).toBe(false);
+    expect(projectInfo.threeVersion).toBe("^0.180.0");
+    expect(projectInfo.threeRelease).toBe(180);
+    expect(projectInfo.reactThreeFiberVersion).toBeNull();
+    expect(projectInfo.reactThreeFiberMajorVersion).toBeNull();
+  });
+
+  it("uses a supported Three.js peer floor instead of a newer dev version", () => {
+    const projectDirectory = path.join(tempDirectory, "three-peer-floor");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "three-peer-floor",
+        dependencies: { react: "^19.0.0" },
+        peerDependencies: { three: "^0.145.0" },
+        devDependencies: { three: "^0.180.0" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.threeVersion).toBe("^0.145.0");
+    expect(projectInfo.threeRelease).toBe(145);
+  });
+
+  it("resolves a catalog-backed Three.js peer floor before a dev version", () => {
+    const projectDirectory = path.join(tempDirectory, "three-catalog-peer-floor");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "pnpm-workspace.yaml"),
+      "catalogs:\n  legacy:\n    three: ^0.145.0\n  modern:\n    three: ^0.180.0\n",
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "three-catalog-peer-floor",
+        dependencies: { react: "^19.0.0" },
+        peerDependencies: { three: "catalog:legacy" },
+        devDependencies: { three: "catalog:modern" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.threeVersion).toBe("^0.145.0");
+    expect(projectInfo.threeRelease).toBe(145);
+  });
+
+  it("uses an optional Three.js runtime version instead of a newer dev version", () => {
+    const projectDirectory = path.join(tempDirectory, "three-optional-runtime");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "three-optional-runtime",
+        dependencies: { react: "^19.0.0" },
+        optionalDependencies: { three: "^0.145.0" },
+        devDependencies: { three: "^0.180.0" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.threeVersion).toBe("^0.145.0");
+    expect(projectInfo.threeRelease).toBe(145);
+  });
+
+  it("skips malformed Three.js dependency values without hiding a valid peer", () => {
+    const projectDirectory = path.join(tempDirectory, "three-malformed-version");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "three-malformed-version",
+        dependencies: { react: "^19.0.0", three: 146 },
+        peerDependencies: { three: "^0.145.0" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.hasThree).toBe(true);
+    expect(projectInfo.threeVersion).toBe("^0.145.0");
+    expect(projectInfo.threeRelease).toBe(145);
+  });
+
+  it("uses the lowest Three.js release across mixed-version workspaces", () => {
+    const projectDirectory = path.join(tempDirectory, "mixed-three-workspace");
+    const modernDirectory = path.join(projectDirectory, "packages", "modern");
+    const legacyDirectory = path.join(projectDirectory, "packages", "legacy");
+    fs.mkdirSync(modernDirectory, { recursive: true });
+    fs.mkdirSync(legacyDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "mixed-three-workspace",
+        private: true,
+        dependencies: { react: "^19.0.0" },
+        workspaces: ["packages/*"],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(modernDirectory, "package.json"),
+      JSON.stringify({ name: "modern", dependencies: { three: "^0.180.0" } }),
+    );
+    fs.writeFileSync(
+      path.join(legacyDirectory, "package.json"),
+      JSON.stringify({ name: "legacy", dependencies: { three: "^0.145.0" } }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.threeVersion).toBe("^0.145.0");
+    expect(projectInfo.threeRelease).toBe(145);
+  });
+
+  it("resolves catalog-backed Three.js versions", () => {
+    const projectDirectory = path.join(tempDirectory, "catalog-three-workspace");
+    const sceneDirectory = path.join(projectDirectory, "packages", "scene");
+    fs.mkdirSync(sceneDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "pnpm-workspace.yaml"),
+      "packages:\n  - packages/*\n\ncatalogs:\n  graphics:\n    three: ^0.146.0\n",
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "catalog-three-workspace",
+        private: true,
+        dependencies: { react: "^19.0.0" },
+        workspaces: ["packages/*"],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(sceneDirectory, "package.json"),
+      JSON.stringify({ name: "scene", dependencies: { three: "catalog:graphics" } }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.threeVersion).toBe("^0.146.0");
+    expect(projectInfo.threeRelease).toBe(146);
+  });
+
+  it("detects the legacy CommonJS-era package name and version", () => {
+    const projectDirectory = path.join(tempDirectory, "legacy-r3f-project");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "legacy-r3f-project",
+        dependencies: { react: "^16.8.0", "react-three-fiber": "^5.3.22" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.hasThree).toBe(true);
+    expect(projectInfo.hasReactThreeFiber).toBe(true);
+    expect(projectInfo.reactThreeFiberVersion).toBe("^5.3.22");
+    expect(projectInfo.reactThreeFiberMajorVersion).toBe(5);
+  });
+
+  it("uses the lowest Fiber major across mixed-version workspaces", () => {
+    const projectDirectory = path.join(tempDirectory, "mixed-r3f-workspace");
+    const modernDirectory = path.join(projectDirectory, "packages", "a-modern");
+    const legacyDirectory = path.join(projectDirectory, "packages", "z-legacy");
+    fs.mkdirSync(modernDirectory, { recursive: true });
+    fs.mkdirSync(legacyDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "mixed-r3f-workspace",
+        private: true,
+        dependencies: { react: "^19.0.0" },
+        workspaces: ["packages/*"],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(modernDirectory, "package.json"),
+      JSON.stringify({ name: "modern", dependencies: { "@react-three/fiber": "^10.0.0" } }),
+    );
+    fs.writeFileSync(
+      path.join(legacyDirectory, "package.json"),
+      JSON.stringify({ name: "legacy", dependencies: { "react-three-fiber": "^5.3.0" } }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.reactThreeFiberVersion).toBe("^5.3.0");
+    expect(projectInfo.reactThreeFiberMajorVersion).toBe(5);
+  });
+
+  it("resolves a root Fiber catalog before comparing workspace majors", () => {
+    const projectDirectory = path.join(tempDirectory, "root-catalog-r3f-workspace");
+    const modernDirectory = path.join(projectDirectory, "packages", "modern");
+    fs.mkdirSync(modernDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "pnpm-workspace.yaml"),
+      'packages:\n  - packages/*\n\ncatalogs:\n  legacy:\n    "@react-three/fiber": ^5.3.0\n',
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "root-catalog-r3f-workspace",
+        private: true,
+        dependencies: { react: "^19.0.0", "@react-three/fiber": "catalog:legacy" },
+        workspaces: ["packages/*"],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(modernDirectory, "package.json"),
+      JSON.stringify({ name: "modern", dependencies: { "@react-three/fiber": "^10.0.0" } }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.reactThreeFiberVersion).toBe("^5.3.0");
+    expect(projectInfo.reactThreeFiberMajorVersion).toBe(5);
+  });
+
+  it("resolves workspace Fiber catalogs before comparing them with the root major", () => {
+    const projectDirectory = path.join(tempDirectory, "workspace-catalog-r3f-workspace");
+    const legacyDirectory = path.join(projectDirectory, "packages", "legacy");
+    fs.mkdirSync(legacyDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "pnpm-workspace.yaml"),
+      'packages:\n  - packages/*\n\ncatalogs:\n  legacy:\n    "@react-three/fiber": ^5.3.0\n',
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "workspace-catalog-r3f-workspace",
+        private: true,
+        dependencies: { react: "^19.0.0", "@react-three/fiber": "^9.0.0" },
+        workspaces: ["packages/*"],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(legacyDirectory, "package.json"),
+      JSON.stringify({
+        name: "legacy",
+        dependencies: { "@react-three/fiber": "catalog:legacy" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.reactThreeFiberVersion).toBe("^5.3.0");
+    expect(projectInfo.reactThreeFiberMajorVersion).toBe(5);
   });
 });
 
@@ -1360,6 +3399,7 @@ describe("discoverProject — hasReanimated", () => {
 
     const projectInfo = discoverProject(projectDirectory);
     expect(projectInfo.hasReanimated).toBe(true);
+    expect(projectInfo.reanimatedVersion).toBe("~3.16.0");
   });
 
   it("is true when a workspace sibling declares `react-native-reanimated` (web-rooted monorepo)", () => {
@@ -1462,6 +3502,385 @@ describe("discoverProject — Zod", () => {
     const projectInfo = discoverProject(rootDirectory);
     expect(projectInfo.zodVersion).toBe("^4.1.0");
     expect(projectInfo.zodMajorVersion).toBe(4);
+  });
+});
+
+describe("discoverProject — MobX", () => {
+  it("detects a direct MobX dependency and parses its major", () => {
+    const projectDirectory = path.join(tempDirectory, "mobx-from-deps");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "mobx-app",
+        dependencies: { react: "^19.0.0", mobx: "^6.16.1" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.mobxVersion).toBe("^6.16.1");
+    expect(projectInfo.mobxMajorVersion).toBe(6);
+  });
+
+  it("detects MobX core and bindings across workspace packages", () => {
+    const rootDirectory = path.join(tempDirectory, "mobx-monorepo");
+    const coreDirectory = path.join(rootDirectory, "packages", "core");
+    const reactDirectory = path.join(rootDirectory, "packages", "react");
+    fs.mkdirSync(coreDirectory, { recursive: true });
+    fs.mkdirSync(reactDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDirectory, "package.json"),
+      JSON.stringify({
+        name: "mobx-monorepo",
+        workspaces: ["packages/*"],
+        dependencies: { react: "^19.0.0", "mobx-react-observer": "^2.0.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(coreDirectory, "package.json"),
+      JSON.stringify({
+        name: "core",
+        dependencies: { mobx: "^6.16.1", "mobx-state-tree": "^7.0.2" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(reactDirectory, "package.json"),
+      JSON.stringify({
+        name: "react",
+        dependencies: { "mobx-react": "^9.2.1", "mobx-react-lite": "^4.1.0" },
+      }),
+    );
+
+    const projectInfo = discoverProject(rootDirectory);
+    expect(projectInfo.mobxVersion).toBe("^6.16.1");
+    expect(projectInfo.mobxMajorVersion).toBe(6);
+    expect(projectInfo.hasMobxReact).toBe(true);
+    expect(projectInfo.mobxReactVersion).toBe("^9.2.1");
+    expect(projectInfo.hasMobxReactLite).toBe(true);
+    expect(projectInfo.mobxReactLiteVersion).toBe("^4.1.0");
+    expect(projectInfo.hasMobxStateTree).toBe(true);
+    expect(projectInfo.hasMobxReactObserver).toBe(true);
+  });
+
+  it("uses the oldest supported MobX major across a mixed-version workspace", () => {
+    const rootDirectory = path.join(tempDirectory, "mixed-mobx-monorepo");
+    const legacyDirectory = path.join(rootDirectory, "apps", "legacy");
+    fs.mkdirSync(legacyDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDirectory, "package.json"),
+      JSON.stringify({
+        name: "mixed-mobx-monorepo",
+        workspaces: ["apps/*"],
+        dependencies: { react: "^19.0.0", mobx: "^6.16.1" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(legacyDirectory, "package.json"),
+      JSON.stringify({ name: "legacy", dependencies: { mobx: "^5.15.7" } }),
+    );
+
+    const projectInfo = discoverProject(rootDirectory);
+    expect(projectInfo.mobxVersion).toBe("^5.15.7");
+    expect(projectInfo.mobxMajorVersion).toBe(5);
+  });
+
+  it("uses the oldest supported MobX minor across a mixed-version workspace", () => {
+    const rootDirectory = path.join(tempDirectory, "mixed-mobx-minor-monorepo");
+    const legacyDirectory = path.join(rootDirectory, "apps", "legacy");
+    fs.mkdirSync(legacyDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDirectory, "package.json"),
+      JSON.stringify({
+        name: "mixed-mobx-minor-monorepo",
+        workspaces: ["apps/*"],
+        dependencies: { react: "^19.0.0", mobx: "^6.10.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(legacyDirectory, "package.json"),
+      JSON.stringify({ name: "legacy", dependencies: { mobx: "^6.9.0" } }),
+    );
+
+    const projectInfo = discoverProject(rootDirectory);
+    expect(projectInfo.mobxVersion).toBe("^6.9.0");
+    expect(buildCapabilities(projectInfo).has("mobx:6.10")).toBe(false);
+  });
+
+  it("uses the oldest React binding version across a mixed-version workspace", () => {
+    const rootDirectory = path.join(tempDirectory, "mixed-mobx-react-monorepo");
+    const legacyDirectory = path.join(rootDirectory, "apps", "legacy");
+    fs.mkdirSync(legacyDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDirectory, "package.json"),
+      JSON.stringify({
+        name: "mixed-mobx-react-monorepo",
+        workspaces: ["apps/*"],
+        dependencies: {
+          react: "^19.0.0",
+          mobx: "^6.16.1",
+          "mobx-react-lite": "^4.1.0",
+        },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(legacyDirectory, "package.json"),
+      JSON.stringify({ name: "legacy", dependencies: { "mobx-react-lite": "^3.2.0" } }),
+    );
+
+    const projectInfo = discoverProject(rootDirectory);
+    expect(projectInfo.mobxReactLiteVersion).toBe("^3.2.0");
+    expect(buildCapabilities(projectInfo).has("mobx-react-binding-observer-memo-guard")).toBe(
+      false,
+    );
+  });
+
+  it("fails closed when any workspace has an unparseable MobX declaration", () => {
+    const rootDirectory = path.join(tempDirectory, "unknown-mobx-monorepo");
+    const unknownDirectory = path.join(rootDirectory, "apps", "unknown");
+    fs.mkdirSync(unknownDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDirectory, "package.json"),
+      JSON.stringify({
+        name: "unknown-mobx-monorepo",
+        workspaces: ["apps/*"],
+        dependencies: { react: "^19.0.0", mobx: "^6.16.1" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(unknownDirectory, "package.json"),
+      JSON.stringify({ name: "unknown", dependencies: { mobx: "workspace:*" } }),
+    );
+
+    const projectInfo = discoverProject(rootDirectory);
+    expect(projectInfo.mobxVersion).toBe("workspace:*");
+    expect(projectInfo.mobxMajorVersion).toBeNull();
+  });
+
+  it("fails closed when an unparseable root MobX declaration precedes a supported workspace", () => {
+    const rootDirectory = path.join(tempDirectory, "unresolved-root-mobx-monorepo");
+    const supportedDirectory = path.join(rootDirectory, "apps", "supported");
+    fs.mkdirSync(supportedDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDirectory, "package.json"),
+      JSON.stringify({
+        name: "unresolved-root-mobx-monorepo",
+        workspaces: ["apps/*"],
+        dependencies: { react: "^19.0.0", mobx: "catalog:" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(supportedDirectory, "package.json"),
+      JSON.stringify({ name: "supported", dependencies: { mobx: "^6.16.1" } }),
+    );
+
+    const projectInfo = discoverProject(rootDirectory);
+    expect(projectInfo.mobxVersion).toBe("catalog:");
+    expect(projectInfo.mobxMajorVersion).toBeNull();
+  });
+
+  it("fails closed when any workspace declares a future MobX major", () => {
+    const rootDirectory = path.join(tempDirectory, "future-mobx-monorepo");
+    const futureDirectory = path.join(rootDirectory, "apps", "future");
+    fs.mkdirSync(futureDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDirectory, "package.json"),
+      JSON.stringify({
+        name: "future-mobx-monorepo",
+        workspaces: ["apps/*"],
+        dependencies: { react: "^19.0.0", mobx: "^6.16.1" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(futureDirectory, "package.json"),
+      JSON.stringify({ name: "future", dependencies: { mobx: "^7.0.0" } }),
+    );
+
+    const projectInfo = discoverProject(rootDirectory);
+    expect(projectInfo.mobxVersion).toBe("^7.0.0");
+    expect(projectInfo.mobxMajorVersion).toBeNull();
+  });
+
+  it("resolves a MobX version from a package catalog", () => {
+    const projectDirectory = path.join(tempDirectory, "catalog-mobx");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "catalog-mobx",
+        catalog: { mobx: "^6.16.1" },
+        dependencies: { react: "^19.0.0", mobx: "catalog:" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.mobxVersion).toBe("^6.16.1");
+    expect(projectInfo.mobxMajorVersion).toBe(6);
+  });
+
+  it("fails closed when a MobX range includes a future major or has no upper bound", () => {
+    for (const [directoryName, mobxVersion] of [
+      ["branched", "^6.16.1 || ^7.0.0"],
+      ["unbounded", ">=6.0.0"],
+    ] as const) {
+      const projectDirectory = path.join(tempDirectory, `mobx-${directoryName}`);
+      fs.mkdirSync(projectDirectory, { recursive: true });
+      fs.writeFileSync(
+        path.join(projectDirectory, "package.json"),
+        JSON.stringify({
+          name: `mobx-${directoryName}`,
+          dependencies: { react: "^19.0.0", mobx: mobxVersion },
+        }),
+      );
+      expect(discoverProject(projectDirectory).mobxMajorVersion).toBeNull();
+    }
+  });
+
+  it("accepts a MobX range explicitly bounded to a supported major", () => {
+    const projectDirectory = path.join(tempDirectory, "mobx-bounded");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "mobx-bounded",
+        dependencies: { react: "^19.0.0", mobx: ">=6.10.0 <7.0.0" },
+      }),
+    );
+    expect(discoverProject(projectDirectory).mobxMajorVersion).toBe(6);
+  });
+});
+
+describe("discoverProject — Zustand", () => {
+  it("detects a direct Zustand dependency and parses its major", () => {
+    const projectDirectory = path.join(tempDirectory, "zustand-from-deps");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "zustand-app",
+        dependencies: { react: "^19.0.0", zustand: "^5.0.8" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.zustandVersion).toBe("^5.0.8");
+    expect(projectInfo.zustandMajorVersion).toBe(5);
+  });
+
+  it("detects Zustand from a workspace package", () => {
+    const rootDirectory = path.join(tempDirectory, "zustand-monorepo");
+    const appDirectory = path.join(rootDirectory, "apps", "web");
+    fs.mkdirSync(appDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDirectory, "package.json"),
+      JSON.stringify({
+        name: "zustand-monorepo",
+        workspaces: ["apps/*"],
+        dependencies: { react: "^19.0.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(appDirectory, "package.json"),
+      JSON.stringify({
+        name: "web",
+        dependencies: { zustand: "^4.5.7" },
+      }),
+    );
+
+    const projectInfo = discoverProject(rootDirectory);
+    expect(projectInfo.zustandVersion).toBe("^4.5.7");
+    expect(projectInfo.zustandMajorVersion).toBe(4);
+  });
+
+  it("uses the oldest supported Zustand major across a mixed-version workspace", () => {
+    const rootDirectory = path.join(tempDirectory, "mixed-zustand-monorepo");
+    const appDirectory = path.join(rootDirectory, "apps", "legacy");
+    fs.mkdirSync(appDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDirectory, "package.json"),
+      JSON.stringify({
+        name: "mixed-zustand-monorepo",
+        workspaces: ["apps/*"],
+        dependencies: { react: "^19.0.0", zustand: "^5.0.8" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(appDirectory, "package.json"),
+      JSON.stringify({
+        name: "legacy",
+        dependencies: { zustand: "^4.5.7" },
+      }),
+    );
+
+    const projectInfo = discoverProject(rootDirectory);
+    expect(projectInfo.zustandVersion).toBe("^4.5.7");
+    expect(projectInfo.zustandMajorVersion).toBe(4);
+  });
+
+  it("fails closed when any workspace has an unparseable Zustand declaration", () => {
+    const rootDirectory = path.join(tempDirectory, "unknown-zustand-monorepo");
+    const appDirectory = path.join(rootDirectory, "apps", "unknown");
+    fs.mkdirSync(appDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDirectory, "package.json"),
+      JSON.stringify({
+        name: "unknown-zustand-monorepo",
+        workspaces: ["apps/*"],
+        dependencies: { react: "^19.0.0", zustand: "^5.0.8" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(appDirectory, "package.json"),
+      JSON.stringify({
+        name: "unknown",
+        dependencies: { zustand: "workspace:*" },
+      }),
+    );
+
+    const projectInfo = discoverProject(rootDirectory);
+    expect(projectInfo.zustandVersion).toBe("workspace:*");
+    expect(projectInfo.zustandMajorVersion).toBeNull();
+  });
+
+  it("fails closed when any workspace declares a future Zustand major", () => {
+    const rootDirectory = path.join(tempDirectory, "future-zustand-monorepo");
+    const appDirectory = path.join(rootDirectory, "apps", "future");
+    fs.mkdirSync(appDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDirectory, "package.json"),
+      JSON.stringify({
+        name: "future-zustand-monorepo",
+        workspaces: ["apps/*"],
+        dependencies: { react: "^19.0.0", zustand: "^5.0.8" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(appDirectory, "package.json"),
+      JSON.stringify({
+        name: "future",
+        dependencies: { zustand: "^6.0.0" },
+      }),
+    );
+
+    const projectInfo = discoverProject(rootDirectory);
+    expect(projectInfo.zustandVersion).toBe("^6.0.0");
+    expect(projectInfo.zustandMajorVersion).toBe(6);
+  });
+
+  it("resolves a Zustand version from a package catalog", () => {
+    const projectDirectory = path.join(tempDirectory, "catalog-zustand");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "catalog-zustand",
+        catalog: { zustand: "^5.0.8" },
+        dependencies: { react: "^19.0.0", zustand: "catalog:" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.zustandVersion).toBe("^5.0.8");
+    expect(projectInfo.zustandMajorVersion).toBe(5);
   });
 });
 
@@ -1724,5 +4143,212 @@ describe("discoverProject — Next.js version", () => {
     const projectInfo = discoverProject(projectDirectory);
     expect(projectInfo.nextjsVersion).toBeNull();
     expect(projectInfo.nextjsMajorVersion).toBeNull();
+  });
+});
+
+describe("discoverProject — Valtio", () => {
+  it("records the declared Valtio version for a single-package project", () => {
+    const projectDirectory = path.join(tempDirectory, "valtio-single-package");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "valtio-app",
+        dependencies: { react: "^19.0.0", valtio: "^2.1.4" },
+      }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.valtioVersion).toBe("^2.1.4");
+    expect(projectInfo.valtioMajorVersion).toBe(2);
+  });
+
+  it("records Valtio declared by a workspace when scanning the monorepo root", () => {
+    const rootDirectory = path.join(tempDirectory, "valtio-monorepo");
+    const appDirectory = path.join(rootDirectory, "apps", "web");
+    fs.mkdirSync(appDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDirectory, "package.json"),
+      JSON.stringify({ name: "root", private: true, workspaces: ["apps/*"] }),
+    );
+    fs.writeFileSync(
+      path.join(appDirectory, "package.json"),
+      JSON.stringify({
+        name: "web",
+        dependencies: { react: "^19.0.0", valtio: "^1.13.2" },
+      }),
+    );
+
+    const projectInfo = discoverProject(rootDirectory);
+    expect(projectInfo.valtioVersion).toBe("^1.13.2");
+    expect(projectInfo.valtioMajorVersion).toBe(1);
+  });
+
+  it("resolves a Valtio catalog declaration from the pnpm workspace", () => {
+    const rootDirectory = path.join(tempDirectory, "valtio-workspace-catalog");
+    const appDirectory = path.join(rootDirectory, "apps", "web");
+    fs.mkdirSync(appDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDirectory, "pnpm-workspace.yaml"),
+      "packages:\n  - apps/*\n\ncatalog:\n  valtio: ^1.13.2\n",
+    );
+    fs.writeFileSync(
+      path.join(rootDirectory, "package.json"),
+      JSON.stringify({ name: "root", private: true }),
+    );
+    fs.writeFileSync(
+      path.join(appDirectory, "package.json"),
+      JSON.stringify({
+        name: "web",
+        dependencies: { react: "^19.0.0", valtio: "catalog:" },
+      }),
+    );
+
+    const projectInfo = discoverProject(appDirectory);
+    expect(projectInfo.valtioVersion).toBe("^1.13.2");
+    expect(projectInfo.valtioMajorVersion).toBe(1);
+  });
+
+  it("keeps the Valtio fact null when no analyzed package declares it", () => {
+    const projectDirectory = path.join(tempDirectory, "without-valtio");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({ name: "plain-react-app", dependencies: { react: "^19.0.0" } }),
+    );
+
+    const projectInfo = discoverProject(projectDirectory);
+    expect(projectInfo.valtioVersion).toBeNull();
+    expect(projectInfo.valtioMajorVersion).toBeNull();
+  });
+});
+
+describe("discoverProject — Next.js static export", () => {
+  it('detects `output: "export"` from the scan root\'s own next.config', () => {
+    const projectDirectory = path.join(tempDirectory, "static-export-root");
+    fs.mkdirSync(projectDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDirectory, "package.json"),
+      JSON.stringify({
+        name: "static-export-root",
+        dependencies: { next: "^15.3.0", react: "^19.0.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDirectory, "next.config.mjs"),
+      'export default { output: "export" };\n',
+    );
+
+    expect(discoverProject(projectDirectory).isStaticExport).toBe(true);
+  });
+
+  it("detects a workspace-level static export when scanning the monorepo root (#976)", () => {
+    const monorepoRoot = path.join(tempDirectory, "static-export-workspace");
+    const webDirectory = path.join(monorepoRoot, "apps", "web");
+    fs.mkdirSync(webDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({ name: "root", private: true, workspaces: ["apps/*"] }),
+    );
+    fs.writeFileSync(
+      path.join(webDirectory, "package.json"),
+      JSON.stringify({
+        name: "web",
+        dependencies: { next: "^15.3.0", react: "^19.0.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(webDirectory, "next.config.mjs"),
+      'export default { output: "export" };\n',
+    );
+
+    const projectInfo = discoverProject(monorepoRoot);
+    expect(projectInfo.framework).toBe("nextjs");
+    expect(projectInfo.isStaticExport).toBe(true);
+  });
+
+  it("attributes static export to the first workspace (walk order) that declares `next`", () => {
+    // Documented first-match semantics: with several Next workspaces, the
+    // config read follows the same workspace that supplied `nextjsVersion`.
+    const monorepoRoot = path.join(tempDirectory, "static-export-two-apps");
+    const adminDirectory = path.join(monorepoRoot, "apps", "admin");
+    const webDirectory = path.join(monorepoRoot, "apps", "web");
+    fs.mkdirSync(adminDirectory, { recursive: true });
+    fs.mkdirSync(webDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({ name: "root", private: true, workspaces: ["apps/*"] }),
+    );
+    fs.writeFileSync(
+      path.join(adminDirectory, "package.json"),
+      JSON.stringify({ name: "admin", dependencies: { next: "^15.3.0", react: "^19.0.0" } }),
+    );
+    fs.writeFileSync(
+      path.join(webDirectory, "package.json"),
+      JSON.stringify({ name: "web", dependencies: { next: "^15.3.0", react: "^19.0.0" } }),
+    );
+    // Only the LATER workspace (apps/web) exports; apps/admin sorts first and
+    // supplies the `next` signal, so the project is not a static export.
+    fs.writeFileSync(
+      path.join(webDirectory, "next.config.mjs"),
+      'export default { output: "export" };\n',
+    );
+
+    const projectInfo = discoverProject(monorepoRoot);
+    expect(projectInfo.framework).toBe("nextjs");
+    expect(projectInfo.isStaticExport).toBe(false);
+  });
+
+  it("classifies a web+mobile monorepo by the web framework regardless of walk order", () => {
+    // apps/a-mobile sorts before apps/web, but the cross-workspace merge is
+    // priority-ranked (web over mobile, mirroring detectFramework), so the
+    // Expo workspace must not claim the framework slot.
+    const monorepoRoot = path.join(tempDirectory, "web-mobile-priority");
+    const mobileDirectory = path.join(monorepoRoot, "apps", "a-mobile");
+    const webDirectory = path.join(monorepoRoot, "apps", "web");
+    fs.mkdirSync(mobileDirectory, { recursive: true });
+    fs.mkdirSync(webDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({ name: "root", private: true, workspaces: ["apps/*"] }),
+    );
+    fs.writeFileSync(
+      path.join(mobileDirectory, "package.json"),
+      JSON.stringify({
+        name: "a-mobile",
+        dependencies: { expo: "~52.0.0", react: "18.3.1", "react-native": "0.76.0" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(webDirectory, "package.json"),
+      JSON.stringify({ name: "web", dependencies: { next: "^15.3.0", react: "^19.0.0" } }),
+    );
+
+    const projectInfo = discoverProject(monorepoRoot);
+    expect(projectInfo.framework).toBe("nextjs");
+    expect(projectInfo.nextjsMajorVersion).toBe(15);
+    // The mobile workspace still surfaces through the RN/Expo facts.
+    expect(projectInfo.hasReactNativeWorkspace).toBe(true);
+    expect(projectInfo.expoVersion).toBe("~52.0.0");
+  });
+
+  it("stays false when no next.config sets output: export anywhere", () => {
+    const monorepoRoot = path.join(tempDirectory, "static-export-none");
+    const webDirectory = path.join(monorepoRoot, "apps", "web");
+    fs.mkdirSync(webDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepoRoot, "package.json"),
+      JSON.stringify({ name: "root", private: true, workspaces: ["apps/*"] }),
+    );
+    fs.writeFileSync(
+      path.join(webDirectory, "package.json"),
+      JSON.stringify({ name: "web", dependencies: { next: "^15.3.0", react: "^19.0.0" } }),
+    );
+    fs.writeFileSync(
+      path.join(webDirectory, "next.config.mjs"),
+      "export default { reactStrictMode: true };\n",
+    );
+
+    expect(discoverProject(monorepoRoot).isStaticExport).toBe(false);
   });
 });

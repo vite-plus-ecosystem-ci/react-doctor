@@ -96,6 +96,8 @@ export const setupReactProject = (
 export interface CollectRuleHitsOptions {
   /** React major to forward to runOxlint (default: 19). Pass null to test the unresolvable-version path. */
   reactMajorVersion?: number | null;
+  /** Full React dependency spec (default: derived from the major) for minor-gated capabilities like `react:19.2`. */
+  reactVersion?: string | null;
   /**
    * Tailwind dependency spec to forward to runOxlint (default: omitted →
    * `null`, which optimistically assumes latest Tailwind so every
@@ -107,26 +109,53 @@ export interface CollectRuleHitsOptions {
   /**
    * Project framework hint (default: "unknown"). Set to "react-native"
    * or "expo" to activate the `rn-*` rule bucket (both add the
-   * `react-native` capability in `buildCapabilities`).
+   * `react-native` capability in `buildCapabilities`), or a
+   * server-capable framework ("remix", "nextjs", "tanstack-start") for
+   * rules gated on a server-mutation story (e.g. `no-prevent-default`'s
+   * form variant).
    */
-  framework?: "unknown" | "react-native" | "expo";
+  framework?: ProjectInfo["framework"];
   hasReactCompiler?: boolean;
+  hasReactCompilerLintPlugin?: boolean;
   hasTanStackQuery?: boolean;
+  tanstackQueryVersion?: string | null;
+  hasSsrDependency?: boolean;
 }
+
+const DERIVED_STATE_SIBLING_RULE_IDS = [
+  "no-adjust-state-on-prop-change",
+  "no-derived-state",
+  "no-derived-state-effect",
+  "no-initialize-state",
+];
+
+export const buildIsolatedDerivedStateRuleConfig = (
+  ruleId: string,
+): Record<string, "off" | "warn"> =>
+  Object.fromEntries(
+    DERIVED_STATE_SIBLING_RULE_IDS.map((siblingRuleId) => [
+      `react-doctor/${siblingRuleId}`,
+      siblingRuleId === ruleId ? "warn" : "off",
+    ]),
+  );
 
 export interface BuildTestProjectOptions {
   rootDirectory: string;
   framework?: ProjectInfo["framework"];
   hasReactCompiler?: boolean;
   hasTanStackQuery?: boolean;
+  tanstackQueryVersion?: string | null;
+  hasSsrDependency?: boolean;
   hasReanimated?: boolean;
   reactMajorVersion?: number | null;
+  reactVersion?: string | null;
   hasTypeScript?: boolean;
   tailwindVersion?: string | null;
   nextjsVersion?: string | null;
   nextjsMajorVersion?: number | null;
   shopifyFlashListVersion?: string | null;
   shopifyFlashListMajorVersion?: number | null;
+  isStaticExport?: boolean;
 }
 
 export const buildTestProject = (options: BuildTestProjectOptions): ProjectInfo => {
@@ -135,9 +164,19 @@ export const buildTestProject = (options: BuildTestProjectOptions): ProjectInfo 
   // unresolvable-version code path). A naive
   // `options.reactMajorVersion ?? 19` collapses both into 19 and
   // silently changes what null-version tests are testing.
-  const reactMajorVersion = Object.hasOwn(options, "reactMajorVersion")
-    ? (options.reactMajorVersion ?? null)
-    : 19;
+  const hasExplicitReactMajorVersion = Object.hasOwn(options, "reactMajorVersion");
+  const reactMajorVersion = hasExplicitReactMajorVersion ? (options.reactMajorVersion ?? null) : 19;
+  // The omitted-version default is optimistic "latest React" — include the
+  // minor so minor-gated capabilities (`react:19.2`) activate too. Explicit
+  // majors keep `.0` so callers can exercise the minor gate boundary.
+  const derivedReactVersion = hasExplicitReactMajorVersion
+    ? reactMajorVersion !== null
+      ? `^${reactMajorVersion}.0.0`
+      : null
+    : "^19.2.0";
+  const reactVersion = Object.hasOwn(options, "reactVersion")
+    ? (options.reactVersion ?? null)
+    : derivedReactVersion;
   const framework = options.framework ?? "unknown";
   const nextjsVersion = Object.hasOwn(options, "nextjsVersion")
     ? (options.nextjsVersion ?? null)
@@ -152,7 +191,7 @@ export const buildTestProject = (options: BuildTestProjectOptions): ProjectInfo 
   return {
     rootDirectory: options.rootDirectory,
     projectName: path.basename(options.rootDirectory),
-    reactVersion: reactMajorVersion !== null ? `^${reactMajorVersion}.0.0` : null,
+    reactVersion,
     reactMajorVersion,
     tailwindVersion: options.tailwindVersion ?? null,
     zodVersion: null,
@@ -160,7 +199,13 @@ export const buildTestProject = (options: BuildTestProjectOptions): ProjectInfo 
     framework,
     hasTypeScript: options.hasTypeScript ?? true,
     hasReactCompiler: options.hasReactCompiler ?? false,
-    hasTanStackQuery: options.hasTanStackQuery ?? false,
+    hasReactCompilerLintPlugin: options.hasReactCompilerLintPlugin ?? false,
+    hasTanStackQuery: options.hasTanStackQuery ?? Boolean(options.tanstackQueryVersion),
+    hasI18nLibrary: false,
+    tanstackQueryVersion: options.tanstackQueryVersion ?? null,
+    mobxVersion: null,
+    styledComponentsVersion: null,
+    hasSsrDependency: options.hasSsrDependency ?? false,
     nextjsVersion,
     nextjsMajorVersion,
     hasReactNativeWorkspace: framework === "expo" || framework === "react-native",
@@ -169,6 +214,7 @@ export const buildTestProject = (options: BuildTestProjectOptions): ProjectInfo 
     shopifyFlashListMajorVersion: options.shopifyFlashListMajorVersion ?? null,
     hasReanimated: options.hasReanimated ?? false,
     isPreES2023Target: false,
+    isStaticExport: options.isStaticExport ?? false,
     preactVersion: null,
     preactMajorVersion: null,
     sourceFileCount: 0,
@@ -192,13 +238,16 @@ export const collectRuleHits = async (
   options: CollectRuleHitsOptions = {},
 ): Promise<RuleHit[]> => {
   const project = buildTestProject({ rootDirectory: projectDir, ...options });
+  const isolatedSiblingRules = DERIVED_STATE_SIBLING_RULE_IDS.includes(ruleId)
+    ? buildIsolatedDerivedStateRuleConfig(ruleId)
+    : { [`react-doctor/${ruleId}`]: "warn" };
   const diagnostics = await runOxlint({
     rootDirectory: projectDir,
     project,
     // Force-enable the rule under test so default-disabled rules
     // (`defaultEnabled: false`) still produce hits here. Severity is
     // irrelevant — callers assert on file path and message, not severity.
-    userConfig: { rules: { [`react-doctor/${ruleId}`]: "warn" } },
+    userConfig: { rules: isolatedSiblingRules },
   });
   return diagnostics
     .filter((diagnostic) => diagnostic.rule === ruleId)

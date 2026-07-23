@@ -4,6 +4,9 @@ import { findJsxAttribute } from "../../utils/find-jsx-attribute.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
+import { resolveJsxElementType } from "../../utils/resolve-jsx-element-type.js";
+
+const ABSOLUTE_URL_SCHEME_PATTERN = /^[a-z][a-z\d+.-]*:/i;
 
 export const nextjsNoPolyfillScript = defineRule({
   id: "nextjs-no-polyfill-script",
@@ -15,8 +18,8 @@ export const nextjsNoPolyfillScript = defineRule({
     "Next.js includes polyfills for fetch, Promise, Object.assign, Array.from, and 50+ others automatically",
   create: (context: RuleContext) => ({
     JSXOpeningElement(node: EsTreeNodeOfType<"JSXOpeningElement">) {
-      if (!isNodeOfType(node.name, "JSXIdentifier")) return;
-      if (node.name.name !== "script" && node.name.name !== "Script") return;
+      const elementName = resolveJsxElementType(node);
+      if (elementName !== "script" && elementName !== "Script") return;
 
       const srcAttribute = findJsxAttribute(node.attributes ?? [], "src");
       if (!srcAttribute?.value) return;
@@ -25,7 +28,17 @@ export const nextjsNoPolyfillScript = defineRule({
         ? srcAttribute.value.value
         : null;
 
-      if (typeof srcValue === "string" && POLYFILL_SCRIPT_PATTERN.test(srcValue)) {
+      const requestUrl = typeof srcValue === "string" ? srcValue.split("#", 1)[0] : null;
+      const requestScheme = requestUrl
+        ?.trimStart()
+        .match(ABSOLUTE_URL_SCHEME_PATTERN)?.[0]
+        .toLowerCase();
+
+      if (
+        requestUrl &&
+        (!requestScheme || requestScheme === "http:" || requestScheme === "https:") &&
+        POLYFILL_SCRIPT_PATTERN.test(requestUrl)
+      ) {
         context.report({
           node,
           message:

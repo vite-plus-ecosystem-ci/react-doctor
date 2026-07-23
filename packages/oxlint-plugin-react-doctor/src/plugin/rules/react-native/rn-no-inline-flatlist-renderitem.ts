@@ -1,7 +1,7 @@
 import { REACT_NATIVE_LIST_COMPONENTS } from "../../constants/react-native.js";
 import { defineRule } from "../../utils/define-rule.js";
 import type { RuleContext } from "../../utils/rule-context.js";
-import { resolveJsxElementName } from "./utils/resolve-jsx-element-name.js";
+import { resolveJsxElementName } from "../../utils/resolve-jsx-element-name.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 
@@ -14,7 +14,7 @@ export const rnNoInlineFlatlistRenderitem = defineRule({
   // React Compiler auto-memoizes inline functions/objects in list rows, so the
   // perf footgun this rule guards against doesn't exist in compiler-enabled
   // projects (#723).
-  disabledBy: ["react-compiler"],
+  disabledWhen: ["react-compiler"],
   recommendation:
     "Move renderItem to a named function or wrap it in useCallback so it is not rebuilt every time the screen redraws.",
   create: (context: RuleContext) => ({

@@ -3,52 +3,44 @@ import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
+import type { ScopeAnalysis } from "../../semantic/scope-analysis.js";
+import { unwrapObjectIntegrityExpression } from "../../utils/unwrap-object-integrity-expression.js";
+import { isIdentitySensitiveMemoComparator } from "../../utils/has-custom-memo-comparator.js";
+import { flattenCalleeName } from "../../utils/flatten-callee-name.js";
 
-const isMemoCall = (node: EsTreeNode): boolean => {
-  if (!isNodeOfType(node, "CallExpression")) return false;
-  if (isNodeOfType(node.callee, "Identifier") && node.callee.name === "memo") return true;
-  if (
-    isNodeOfType(node.callee, "MemberExpression") &&
-    isNodeOfType(node.callee.object, "Identifier") &&
-    node.callee.object.name === "React" &&
-    isNodeOfType(node.callee.property, "Identifier") &&
-    node.callee.property.name === "memo"
-  )
-    return true;
-  return false;
-};
+const MEMO_CALLEE_NAMES: ReadonlySet<string> = new Set(["memo", "React.memo"]);
 
-// `memo(Comp, undefined)` normalizes to React's default shallow compare,
-// and an identifier named `shallowEqual` (the react-redux idiom) is
-// behaviorally the same — inline props defeat both exactly like the
-// default comparator.
-const isDefaultEquivalentComparator = (comparator: EsTreeNode | undefined): boolean =>
-  isNodeOfType(comparator, "Identifier") &&
-  (comparator.name === "undefined" || comparator.name === "shallowEqual");
+const isMemoCall = (node: EsTreeNode): boolean =>
+  isNodeOfType(node, "CallExpression") &&
+  MEMO_CALLEE_NAMES.has(flattenCalleeName(node.callee) ?? "");
 
 // `memo(Comp, areEqual)` with a custom comparator decides re-renders on
 // its own terms — an inline prop the comparator never inspects doesn't
 // defeat memoization. We can't prove which props the comparator reads, so
 // conservatively skip flagging inline props for such components.
-const hasCustomComparator = (node: EsTreeNode): boolean =>
-  isNodeOfType(node, "CallExpression") &&
-  (node.arguments?.length ?? 0) >= 2 &&
-  !isDefaultEquivalentComparator(node.arguments?.[1]);
+const hasCustomComparator = (node: EsTreeNode, scopes: ScopeAnalysis): boolean => {
+  if (!isNodeOfType(node, "CallExpression")) return false;
+  const comparator = node.arguments?.[1];
+  return comparator ? !isIdentitySensitiveMemoComparator(comparator, scopes) : false;
+};
 
-const isInlineReference = (node: EsTreeNode): string | null => {
+const isInlineReference = (node: EsTreeNode, scopes: ScopeAnalysis): string | null => {
+  const referenceNode = unwrapObjectIntegrityExpression(node, scopes);
+
   if (
-    isNodeOfType(node, "ArrowFunctionExpression") ||
-    isNodeOfType(node, "FunctionExpression") ||
-    (isNodeOfType(node, "CallExpression") &&
-      isNodeOfType(node.callee, "MemberExpression") &&
-      isNodeOfType(node.callee.property, "Identifier") &&
-      node.callee.property.name === "bind")
+    isNodeOfType(referenceNode, "ArrowFunctionExpression") ||
+    isNodeOfType(referenceNode, "FunctionExpression") ||
+    (isNodeOfType(referenceNode, "CallExpression") &&
+      isNodeOfType(referenceNode.callee, "MemberExpression") &&
+      isNodeOfType(referenceNode.callee.property, "Identifier") &&
+      referenceNode.callee.property.name === "bind")
   )
     return "functions";
 
-  if (isNodeOfType(node, "ObjectExpression")) return "objects";
-  if (isNodeOfType(node, "ArrayExpression")) return "Arrays";
-  if (isNodeOfType(node, "JSXElement") || isNodeOfType(node, "JSXFragment")) return "JSX";
+  if (isNodeOfType(referenceNode, "ObjectExpression")) return "objects";
+  if (isNodeOfType(referenceNode, "ArrayExpression")) return "Arrays";
+  if (isNodeOfType(referenceNode, "JSXElement") || isNodeOfType(referenceNode, "JSXFragment"))
+    return "JSX";
 
   return null;
 };
@@ -58,6 +50,10 @@ export const noInlinePropOnMemoComponent = defineRule({
   title: "Inline prop defeats memo()",
   tags: ["test-noise"],
   severity: "warn",
+  // React Compiler memoizes inline prop allocations, so they keep their
+  // identity between renders and no longer defeat `memo()`. Mirrors the
+  // `jsx-no-new-*-as-prop` rules, which gate on the same capability.
+  disabledWhen: ["react-compiler"],
   recommendation:
     "Move the inline `() => ...` / `[]` / `{}` to a stable value with useMemo, useCallback, or module scope, so the memoized child stops redrawing on every parent render",
   create: (context: RuleContext) => {
@@ -66,7 +62,7 @@ export const noInlinePropOnMemoComponent = defineRule({
     return {
       VariableDeclarator(node: EsTreeNodeOfType<"VariableDeclarator">) {
         if (!isNodeOfType(node.id, "Identifier") || !node.init) return;
-        if (isMemoCall(node.init) && !hasCustomComparator(node.init)) {
+        if (isMemoCall(node.init) && !hasCustomComparator(node.init, context.scopes)) {
           memoizedComponentNames.add(node.id.name);
         }
       },
@@ -75,7 +71,7 @@ export const noInlinePropOnMemoComponent = defineRule({
           node.declaration &&
           isNodeOfType(node.declaration, "CallExpression") &&
           isMemoCall(node.declaration) &&
-          !hasCustomComparator(node.declaration)
+          !hasCustomComparator(node.declaration, context.scopes)
         ) {
           const innerArgument = node.declaration.arguments?.[0];
           if (isNodeOfType(innerArgument, "Identifier")) {
@@ -104,7 +100,7 @@ export const noInlinePropOnMemoComponent = defineRule({
         }
         if (!elementName || !memoizedComponentNames.has(elementName)) return;
 
-        const propType = isInlineReference(node.value.expression);
+        const propType = isInlineReference(node.value.expression, context.scopes);
         if (propType) {
           context.report({
             node: node.value.expression,

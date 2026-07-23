@@ -1,5 +1,7 @@
 import type { EsTreeNode } from "../../../utils/es-tree-node.js";
+import { isFunctionLike } from "../../../utils/is-function-like.js";
 import { isNodeOfType } from "../../../utils/is-node-of-type.js";
+import { walkAst } from "../../../utils/walk-ast.js";
 import {
   addPatternBindings,
   collectPatternAssignmentNames,
@@ -8,8 +10,31 @@ import {
   createBlockBindingScope,
   createComponentBindingScope,
   getVariableDeclarationScope,
+  resolveBindingName,
   type BindingScope,
 } from "./scope-aware-reference-names.js";
+import { getStaticMemberPropertyName } from "./static-member-property-name.js";
+
+const MUTATING_COLLECTION_METHOD_NAMES = new Set(["push", "unshift", "splice", "set", "add"]);
+const SYNCHRONOUS_ITERATOR_METHOD_NAMES = new Set([
+  "every",
+  "filter",
+  "find",
+  "findIndex",
+  "flatMap",
+  "forEach",
+  "map",
+  "reduce",
+  "reduceRight",
+  "some",
+]);
+
+const getMemberRootBindingName = (node: EsTreeNode, scope: BindingScope): string | null => {
+  let currentNode = node;
+  while (isNodeOfType(currentNode, "MemberExpression")) currentNode = currentNode.object;
+  if (!isNodeOfType(currentNode, "Identifier")) return null;
+  return resolveBindingName(scope, currentNode.name);
+};
 
 const addDependencies = (
   graph: Map<string, Set<string>>,
@@ -83,8 +108,75 @@ const addAssignmentExpressionDependencies = (
     );
   }
   const assignedNames = collectPatternAssignmentNames(expression.left, scope);
+  if (isNodeOfType(expression.left, "MemberExpression")) {
+    const memberRootName = getMemberRootBindingName(expression.left, scope);
+    if (memberRootName) assignedNames.add(memberRootName);
+  }
   for (const assignedName of assignedNames) {
     addDependencies(graph, assignedName, dependencyNames);
+  }
+};
+
+// `rows.push(row)` / `bySlug.set(key, value)` mutate the receiver with the
+// argument values, so the receiver depends on them just like `rows = [...rows,
+// row]` would.
+const addMutatingCollectionCallDependencies = (
+  graph: Map<string, Set<string>>,
+  expression: EsTreeNode,
+  scope: BindingScope,
+  eventHandlerReferenceNames: Set<string>,
+  controlDependencyNames: Set<string>,
+): void => {
+  if (!isNodeOfType(expression, "CallExpression")) return;
+  if (!isNodeOfType(expression.callee, "MemberExpression")) return;
+  const methodName = getStaticMemberPropertyName(expression.callee);
+  if (!methodName || !MUTATING_COLLECTION_METHOD_NAMES.has(methodName)) return;
+  const receiverRootName = getMemberRootBindingName(expression.callee.object, scope);
+  if (!receiverRootName) return;
+  const dependencyNames = new Set<string>();
+  for (const argument of expression.arguments ?? []) {
+    addDependencyNames(
+      dependencyNames,
+      collectScopedReferenceNames(argument, scope, eventHandlerReferenceNames),
+    );
+  }
+  addDependencyNames(dependencyNames, controlDependencyNames);
+  addDependencies(graph, receiverRootName, dependencyNames);
+};
+
+const addIteratorMutationDependencies = (
+  graph: Map<string, Set<string>>,
+  expression: EsTreeNode,
+  scope: BindingScope,
+  eventHandlerReferenceNames: Set<string>,
+  controlDependencyNames: Set<string>,
+): void => {
+  if (!isNodeOfType(expression, "CallExpression")) return;
+  if (!isNodeOfType(expression.callee, "MemberExpression")) return;
+  const methodName = getStaticMemberPropertyName(expression.callee);
+  if (!methodName || !SYNCHRONOUS_ITERATOR_METHOD_NAMES.has(methodName)) return;
+  const iteratorDependencyNames = collectScopedReferenceNames(
+    expression.callee.object,
+    scope,
+    eventHandlerReferenceNames,
+  );
+  addDependencyNames(iteratorDependencyNames, controlDependencyNames);
+  for (const argument of expression.arguments ?? []) {
+    if (
+      !isNodeOfType(argument, "ArrowFunctionExpression") &&
+      !isNodeOfType(argument, "FunctionExpression")
+    ) {
+      continue;
+    }
+    walkAst(argument.body as EsTreeNode, (node: EsTreeNode): boolean | void => {
+      if (node !== argument.body && isFunctionLike(node)) return false;
+      if (!isNodeOfType(node, "CallExpression")) return;
+      if (!isNodeOfType(node.callee, "MemberExpression")) return;
+      const nestedMethodName = getStaticMemberPropertyName(node.callee);
+      if (!nestedMethodName || !MUTATING_COLLECTION_METHOD_NAMES.has(nestedMethodName)) return;
+      const receiverRootName = getMemberRootBindingName(node.callee.object, scope);
+      if (receiverRootName) addDependencies(graph, receiverRootName, iteratorDependencyNames);
+    });
   }
 };
 
@@ -97,6 +189,24 @@ const collectExpressionDependencies = (
 ): void => {
   if (isNodeOfType(expression, "AssignmentExpression")) {
     addAssignmentExpressionDependencies(
+      graph,
+      expression,
+      scope,
+      eventHandlerReferenceNames,
+      controlDependencyNames,
+    );
+    return;
+  }
+
+  if (isNodeOfType(expression, "CallExpression")) {
+    addMutatingCollectionCallDependencies(
+      graph,
+      expression,
+      scope,
+      eventHandlerReferenceNames,
+      controlDependencyNames,
+    );
+    addIteratorMutationDependencies(
       graph,
       expression,
       scope,

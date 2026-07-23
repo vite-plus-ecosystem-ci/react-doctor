@@ -14,6 +14,7 @@ import type {
   SuppressedRuleCount,
 } from "./types/index.js";
 import { assignFixGroups } from "./utils/assign-fix-groups.js";
+import { dedupeRelatedDiagnostics } from "./utils/dedupe-related-diagnostics.js";
 import { sortDiagnosticsStable } from "./utils/sort-diagnostics-stable.js";
 import { buildDiagnosticPipeline } from "./build-diagnostic-pipeline.js";
 import { checkExpoProject } from "./check-expo-project.js";
@@ -57,7 +58,7 @@ import { Config, type ResolvedConfig } from "./services/config.js";
 import { DeadCode } from "./services/dead-code.js";
 import { Files } from "./services/files.js";
 import { Git } from "./services/git.js";
-import { LintPartialFailures, Linter } from "./services/linter.js";
+import { type LintFileCoverage, LintPartialFailures, Linter } from "./services/linter.js";
 import { Progress } from "./services/progress.js";
 import { Project } from "./services/project.js";
 import { Reporter } from "./services/reporter.js";
@@ -66,6 +67,7 @@ import { SupplyChain } from "./services/supply-chain.js";
 import type { ScoreRequestMetadata } from "./calculate-score.js";
 import { resolveGithubActionsScoreMetadata } from "./utils/resolve-github-actions-score-metadata.js";
 import { resolveScanConcurrency } from "./utils/resolve-scan-concurrency.js";
+import { toNormalizedRelativePath } from "./utils/to-normalized-relative-path.js";
 
 export interface InspectInput {
   readonly directory: string;
@@ -81,6 +83,8 @@ export interface InspectInput {
   readonly warnings?: boolean;
   readonly adoptExistingLintConfig: boolean;
   readonly ignoredTags: ReadonlySet<string>;
+  readonly includedTags?: ReadonlySet<string>;
+  readonly includeTagDefaults?: boolean;
   readonly nodeBinaryPath?: string;
   /** Whether dead-code analysis runs. Gated also on `!isDiffMode`. */
   readonly runDeadCode: boolean;
@@ -115,15 +119,11 @@ export interface InspectInput {
    */
   readonly suppressScanSummary?: boolean;
   /**
-   * When `true`, `includePaths` is linted verbatim instead of being
-   * narrowed to JSX (`.tsx` / `.jsx`) files. The CLI's diff / staged
-   * paths intentionally restrict to JSX so a changed-files scan stays
-   * React-focused, but an editor scanning the exact buffer the user is
-   * editing wants its diagnostics regardless of extension (custom
-   * hooks, server actions, and module-level rules all fire in plain
-   * `.ts`). Defaults to `false` to preserve the CLI contract.
+   * When `true`, `includePaths` is linted verbatim instead of being filtered
+   * to React Doctor's supported source-file set. Editor scans use this for the
+   * exact buffer supplied by the language server.
    */
-  readonly skipJsxIncludeFilter?: boolean;
+  readonly skipExplicitIncludePathFilter?: boolean;
   /**
    * Whether the scanned project's `package.json` is among the changed files
    * in a diff / staged scan. Dependency health is a whole-project property
@@ -206,6 +206,8 @@ export interface InspectOutput {
    * per-project counts are summed.
    */
   readonly scannedFilePaths: ReadonlyArray<string>;
+  /** Project-relative POSIX paths the lint pass completed successfully. */
+  readonly analyzedFiles: ReadonlyArray<string>;
   /** Wall-clock duration of the scan phase, in milliseconds. */
   readonly scanElapsedMilliseconds: number;
   /**
@@ -218,16 +220,17 @@ export interface InspectOutput {
   /**
    * `true` when the background supply-chain fiber hit its overlap budget
    * (`SupplyChainOverlapTimeoutMs`) and failed open to no diagnostics — a
-   * rare hung-socket guard, surfaced for telemetry. `false` on the healthy
-   * path and whenever supply-chain was skipped (diff/staged scans).
+   * rare hung-socket guard, surfaced for telemetry and skipped-check
+   * accounting. `false` on the healthy path and whenever supply-chain was
+   * skipped (diff/staged scans).
    */
   readonly supplyChainOverlapTimedOut: boolean;
   /**
    * `true` when the forked security scan failed (a non-ignorable fs error
    * escaping the cooperative walk) and failed open to no diagnostics —
-   * surfaced for telemetry so a failed pass is distinguishable from a clean
-   * one with zero findings. `false` on the healthy path and when the pass
-   * was skipped (diff/staged scans).
+   * surfaced for telemetry and skipped-check accounting so a failed pass is
+   * distinguishable from a clean one with zero findings. `false` on the
+   * healthy path and when the pass was skipped (diff/staged scans).
    */
   readonly securityScanFailed: boolean;
   /**
@@ -238,6 +241,37 @@ export interface InspectOutput {
    */
   readonly lintCacheHitFileCount: number | null;
   readonly lintCacheTotalFileCount: number | null;
+  /**
+   * Sidecar lint cache outcome for the lint pass: cache-hit files whose
+   * cross-file diagnostics replayed from the sidecar store, and the hits
+   * considered. Both `null` when the sidecar cache was disabled or bypassed
+   * (per-file cache off, `REACT_DOCTOR_NO_SIDECAR_CACHE`, no bounded
+   * cross-file rule enabled). Fed to the Sentry wide event as
+   * `lint.sidecarReplayRatio`.
+   */
+  readonly lintSidecarReplayedFileCount: number | null;
+  readonly lintSidecarTotalFileCount: number | null;
+  /**
+   * Dead-code result cache outcome for this scan's dead-code pass: `true`
+   * when the cached result was replayed (the analysis worker never spawned),
+   * `false` on a miss (fresh analysis). `null` when the pass never consulted
+   * the cache — dead-code skipped/disabled, the cache off
+   * (`REACT_DOCTOR_NO_CACHE` / `REACT_DOCTOR_NO_DEAD_CODE_CACHE`), or the
+   * pass discarded by a lint failure. Fed to the Sentry wide event as
+   * `deadCode.cacheHit`.
+   */
+  readonly deadCodeCacheHit: boolean | null;
+  /**
+   * deslop's incremental summary-cache outcome for this scan's dead-code
+   * ANALYSIS: collected files served from cached parse summaries vs freshly
+   * parsed. Both `null` whenever no analysis consulted the incremental store —
+   * a whole-result cache hit (no analysis ran), the cache off, dead-code
+   * skipped/disabled, or the pass discarded by a lint failure. Fed to the
+   * Sentry wide event as `deadCode.summaryCacheHits` /
+   * `deadCode.summaryCacheMisses`.
+   */
+  readonly deadCodeSummaryCacheHits: number | null;
+  readonly deadCodeSummaryCacheMisses: number | null;
   /**
    * Per-rule tallies of diagnostics the pipeline dropped because the user
    * explicitly silenced the rule (config off switches, per-path overrides,
@@ -424,21 +458,20 @@ export const runInspect = <HooksR = never>(
         : Effect.succeed(null as string | null),
     );
 
-    const explicitLintIncludePaths = input.skipJsxIncludeFilter
+    const explicitLintIncludePaths = input.skipExplicitIncludePathFilter
       ? input.includePaths.length > 0
         ? [...input.includePaths]
         : undefined
-      : computeExplicitLintIncludePaths([...input.includePaths], project);
+      : computeExplicitLintIncludePaths([...input.includePaths]);
     const lintIncludePaths =
-      explicitLintIncludePaths ??
-      resolveLintIncludePaths(scanDirectory, resolvedConfig.config, project);
+      explicitLintIncludePaths ?? resolveLintIncludePaths(scanDirectory, resolvedConfig.config);
 
     // Absolute paths of the exact file set the linter scans, captured ONLY
     // for the multi-project summary (the sole consumer), which signals via
     // `suppressScanSummary`. Gating avoids a redundant full-tree walk on
     // every single-project / `diagnose()` run — for a full scan the linter
     // already enumerates the same files, so we'd otherwise list twice.
-    const scannedFilePaths = input.suppressScanSummary
+    const fallbackScannedFilePaths = input.suppressScanSummary
       ? (lintIncludePaths ?? (yield* filesService.listSourceFiles(scanDirectory))).map(
           (relativePath) => path.resolve(scanDirectory, relativePath),
         )
@@ -460,9 +493,11 @@ export const runInspect = <HooksR = never>(
       showWarnings,
     });
 
+    const filterPerElementPipeline = <ToEnv>(rawStream: Stream.Stream<Diagnostic, never, ToEnv>) =>
+      rawStream.pipe(Stream.filterMap(filterMapNullable<Diagnostic, Diagnostic>(transform.apply)));
+
     const applyPerElementPipeline = <ToEnv>(rawStream: Stream.Stream<Diagnostic, never, ToEnv>) =>
-      rawStream.pipe(
-        Stream.filterMap(filterMapNullable<Diagnostic, Diagnostic>(transform.apply)),
+      filterPerElementPipeline(rawStream).pipe(
         Stream.tap((diagnostic) => reporterService.emit(diagnostic)),
       );
 
@@ -511,6 +546,8 @@ export const runInspect = <HooksR = never>(
                   checkSecurityScanCooperative(scanDirectory, {
                     project,
                     ignoredTags: input.ignoredTags,
+                    includedTags: input.includedTags,
+                    includeTagDefaults: input.includeTagDefaults,
                   }),
                 ).pipe(
                   Effect.map((diagnostics) => Stream.fromIterable(diagnostics)),
@@ -673,6 +710,13 @@ export const runInspect = <HooksR = never>(
               rootDirectory: scanDirectory,
               parseConcurrency: deadCodeParseConcurrency,
               workerTimeoutMs: deadCodeTimeout.workerTimeoutMs,
+              onCacheOutcome: (didHitCache) => {
+                deadCodeCacheHit = didHitCache;
+              },
+              onSummaryCacheStats: (stats) => {
+                deadCodeSummaryCacheHits = stats.hits;
+                deadCodeSummaryCacheMisses = stats.misses;
+              },
             })
             .pipe(
               Stream.catchTag("ReactDoctorError", (error: ReactDoctorError) =>
@@ -736,6 +780,12 @@ export const runInspect = <HooksR = never>(
     // or bypassed so the wide event can tell "no cache" from "0% hit".
     let lintCacheHitFileCount: number | null = null;
     let lintCacheTotalFileCount: number | null = null;
+    let lintSidecarReplayedFileCount: number | null = null;
+    let lintSidecarTotalFileCount: number | null = null;
+    let deadCodeCacheHit: boolean | null = null;
+    let deadCodeSummaryCacheHits: number | null = null;
+    let deadCodeSummaryCacheMisses: number | null = null;
+    const lintFileCoverageState: { value: LintFileCoverage | null } = { value: null };
 
     const baseLintStream = linterService
       .run({
@@ -747,6 +797,8 @@ export const runInspect = <HooksR = never>(
         respectInlineDisables: input.respectInlineDisables,
         adoptExistingLintConfig: input.adoptExistingLintConfig,
         ignoredTags: input.ignoredTags,
+        includedTags: input.includedTags,
+        includeTagDefaults: input.includeTagDefaults,
         userConfig: resolvedConfig.config ?? undefined,
         configSourceDirectory: resolvedConfig.configSourceDirectory ?? undefined,
         onFileProgress: (scannedFileCount, totalFileCount) => {
@@ -757,9 +809,16 @@ export const runInspect = <HooksR = never>(
             ),
           );
         },
+        onFileCoverage: (coverage) => {
+          lintFileCoverageState.value = coverage;
+        },
         onCacheStats: (cacheHitFileCount, totalConsideredFileCount) => {
           lintCacheHitFileCount = cacheHitFileCount;
           lintCacheTotalFileCount = totalConsideredFileCount;
+        },
+        onSidecarStats: (sidecarReplayedFileCount, sidecarConsideredFileCount) => {
+          lintSidecarReplayedFileCount = sidecarReplayedFileCount;
+          lintSidecarTotalFileCount = sidecarConsideredFileCount;
         },
         deadlineEpochMs: input.deadlineEpochMs,
       })
@@ -791,7 +850,9 @@ export const runInspect = <HooksR = never>(
     // the existing lint-failure contract (score becomes null) with an
     // `OxlintBatchExceeded`-tagged reason so renderers dispatch on it, and
     // yield an empty chunk so the rest of the scan still completes.
-    const lintCollected = yield* Stream.runCollect(applyPerElementPipeline(rawLintStream)).pipe(
+    const filteredLintDiagnostics = yield* Stream.runCollect(
+      filterPerElementPipeline(rawLintStream),
+    ).pipe(
       Effect.timeoutOption(lintPhaseTimeoutMs),
       Effect.flatMap(
         Option.match({
@@ -808,6 +869,8 @@ export const runInspect = <HooksR = never>(
         }),
       ),
     );
+    const lintCollected = dedupeRelatedDiagnostics(filteredLintDiagnostics);
+    yield* Effect.forEach(lintCollected, reporterService.emit, { discard: true });
     const lintFailureState = yield* Ref.get(lintFailure);
     yield* afterLint(lintFailureState.didFail);
 
@@ -821,8 +884,35 @@ export const runInspect = <HooksR = never>(
     // short of N even though every file was scanned (issue #815). Resolve the
     // full total now and carry it into the dead-code label so "scanned N files"
     // stays visible for the whole (longer) dead-code pass.
+    const candidateFiles =
+      lintFileCoverageState.value === null
+        ? []
+        : [
+            ...new Set(
+              lintFileCoverageState.value.candidateFiles.map((filePath) =>
+                toNormalizedRelativePath(filePath, scanDirectory),
+              ),
+            ),
+          ];
+    const analyzedFiles =
+      lintFileCoverageState.value === null
+        ? []
+        : [
+            ...new Set(
+              lintFileCoverageState.value.analyzedFiles.map((filePath) =>
+                toNormalizedRelativePath(filePath, scanDirectory),
+              ),
+            ),
+          ].sort();
     const totalFileCount =
-      lastReportedTotalFileCount || (lintIncludePaths?.length ?? project.sourceFileCount);
+      candidateFiles.length ||
+      lastReportedTotalFileCount ||
+      (lintIncludePaths?.length ?? project.sourceFileCount);
+    const scannedFilePaths = input.suppressScanSummary
+      ? candidateFiles.length > 0
+        ? candidateFiles.map((filePath) => path.resolve(scanDirectory, filePath))
+        : fallbackScannedFilePaths
+      : [];
     const scannedFilesLabel = `${totalFileCount} ${totalFileCount === 1 ? "file" : "files"}`;
 
     // Resolve dead-code now that lint has settled. Three paths:
@@ -979,12 +1069,20 @@ export const runInspect = <HooksR = never>(
       deadCodeOverlapped: shouldOverlapDeadCode,
       scannedFileCount: totalFileCount,
       scannedFilePaths,
+      analyzedFiles,
       scanElapsedMilliseconds,
       scanConcurrency,
       supplyChainOverlapTimedOut: supplyChainResult.timedOut,
       securityScanFailed,
       lintCacheHitFileCount,
       lintCacheTotalFileCount,
+      lintSidecarReplayedFileCount,
+      lintSidecarTotalFileCount,
+      // Lint failure discards the dead-code pass entirely (see
+      // `deadCodeFailureState` above), so its cache outcomes must not leak.
+      deadCodeCacheHit: lintFailureState.didFail ? null : deadCodeCacheHit,
+      deadCodeSummaryCacheHits: lintFailureState.didFail ? null : deadCodeSummaryCacheHits,
+      deadCodeSummaryCacheMisses: lintFailureState.didFail ? null : deadCodeSummaryCacheMisses,
       suppressedRuleCounts: transform.summarizeSuppressions(),
     };
   }).pipe(

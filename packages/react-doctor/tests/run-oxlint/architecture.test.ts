@@ -12,7 +12,9 @@ describe("runOxlint", () => {
       rootDirectory: BASIC_REACT_DIRECTORY,
       project: buildTestProject({
         rootDirectory: BASIC_REACT_DIRECTORY,
-        hasTanStackQuery: true,
+        tanstackQueryVersion: "^5.66.0",
+        mobxVersion: null,
+        styledComponentsVersion: null,
       }),
     });
   });
@@ -33,7 +35,8 @@ describe("runOxlint", () => {
       "no-nested-component-definition": {
         fixture: "architecture-issues.tsx",
         ruleSource: "rules/architecture.ts",
-        severity: "error",
+        // Aligned with `no-unstable-nested-components` (same defect class).
+        severity: "warning",
       },
       "no-many-boolean-props": {
         fixture: "new-rules.tsx",

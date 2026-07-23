@@ -88,4 +88,87 @@ describe("a11y/role-has-required-aria-props regressions", () => {
     const result = runRule(roleHasRequiredAriaProps, `const H = () => <div role="heading" />;`);
     expect(result.diagnostics).toHaveLength(1);
   });
+
+  // Docs-validation FP (mapguide test mock): a native `<select>` already
+  // carries the implicit combobox role with built-in expansion semantics,
+  // so a redundant explicit role doesn't need aria-controls/aria-expanded.
+  it('exempts a native `<select role="combobox">`', () => {
+    const result = runRule(
+      roleHasRequiredAriaProps,
+      `const S = ({ value, onChange }) => <select role="combobox" value={value} onChange={onChange} />;`,
+    );
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it('still flags a custom `<div role="combobox">` missing its required props', () => {
+    const result = runRule(roleHasRequiredAriaProps, `const C = () => <div role="combobox" />;`);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  // The doc's named native-backing FP: a native `<option>` supplies
+  // selectedness from its DOM `selected` state.
+  it('exempts a native `<option role="option">`', () => {
+    const result = runRule(
+      roleHasRequiredAriaProps,
+      `const O = () => <option role="option" value="a">A</option>;`,
+    );
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it('still flags a custom `<div role="option">` missing aria-selected', () => {
+    const result = runRule(roleHasRequiredAriaProps, `const O = () => <div role="option" />;`);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("flags a ternary role whose branches both miss their required props", () => {
+    const result = runRule(
+      roleHasRequiredAriaProps,
+      `const T = ({ single }) => <div role={single ? "radio" : "checkbox"} />;`,
+    );
+    expect(result.diagnostics).toHaveLength(2);
+  });
+
+  it("flags a const-bound role missing its required props", () => {
+    const result = runRule(
+      roleHasRequiredAriaProps,
+      `const toggleRole = "switch";
+const T = () => <div role={toggleRole} />;`,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag a ternary role when the required props are present", () => {
+    const result = runRule(
+      roleHasRequiredAriaProps,
+      `const T = ({ single, isOn }) => (
+        <div role={single ? "radio" : "checkbox"} aria-checked={isOn} />
+      );`,
+    );
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("does not flag a role resolved from a parameter", () => {
+    const result = runRule(
+      roleHasRequiredAriaProps,
+      `const T = ({ widgetRole }) => <div role={widgetRole} />;`,
+    );
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("flags each token of a space-separated fallback role list", () => {
+    const result = runRule(
+      roleHasRequiredAriaProps,
+      `const T = () => <div role="switch checkbox" />;`,
+    );
+    expect(result.diagnostics).toHaveLength(2);
+  });
+
+  it("does not flag a role bound via a destructuring default (source may override)", () => {
+    const result = runRule(
+      roleHasRequiredAriaProps,
+      `const { role = "switch" } = config;
+const T = () => <div role={role} />;`,
+    );
+    expect(result.diagnostics).toEqual([]);
+  });
 });

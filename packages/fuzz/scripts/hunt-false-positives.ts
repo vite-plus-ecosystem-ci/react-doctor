@@ -1,4 +1,3 @@
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { reactDoctorRules } from "../../oxlint-plugin-react-doctor/src/plugin/rule-registry.js";
 import { runRule } from "../../oxlint-plugin-react-doctor/src/test-utils/run-rule.js";
@@ -16,7 +15,7 @@ import { loadFuzzCorpus } from "../src/load-fuzz-corpus.js";
 //   HUNT_CORPUS_DIR=tmp/corpus-repos bun scripts/hunt-false-positives.ts
 
 const packageRoot = path.resolve(import.meta.dirname, "..");
-const regressionsDirectory = path.join(packageRoot, "corpus");
+const regressionsDirectory = path.join(packageRoot, "corpus", "regressions");
 
 interface SeedHit {
   seed: string;
@@ -29,6 +28,22 @@ const namedRulesFor = (code: string): Set<string> => {
   const match = code.match(/^\/\/ rule: (.+)$/m);
   if (!match) return new Set();
   return new Set(match[1].split(",").map((name) => name.trim()));
+};
+
+const reactMajorFor = (code: string): number | null => {
+  const match = code.match(/^\/\/ react-major: (\d+)$/m);
+  return match ? Number.parseInt(match[1], 10) : null;
+};
+
+const isDisabledForReactMajor = (
+  entry: (typeof reactDoctorRules)[number],
+  reactMajor: number | null,
+): boolean => {
+  if (reactMajor === null) return false;
+  return (entry.rule.disabledWhen ?? []).some((capability) => {
+    const match = capability.match(/^react:(\d+)$/);
+    return match !== null && reactMajor >= Number.parseInt(match[1], 10);
+  });
 };
 
 // Seeds are modern-React programs with no framework context, so rules gated
@@ -47,8 +62,10 @@ const seeds = loadFuzzCorpus(regressionsDirectory);
 const hits: SeedHit[] = [];
 for (const seed of seeds) {
   const namedRules = namedRulesFor(seed.code);
+  const reactMajor = reactMajorFor(seed.code);
   for (const entry of reactDoctorRules) {
     if (!isHuntableRule(entry)) continue;
+    if (namedRules.has(entry.id) && isDisabledForReactMajor(entry, reactMajor)) continue;
     let diagnostics: ReadonlyArray<{ message: string }> = [];
     try {
       diagnostics = runRule(entry.rule, seed.code, {

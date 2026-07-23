@@ -3,11 +3,57 @@ import { TIMER_AND_SCHEDULER_DIRECT_CALLEE_NAMES } from "./dom.js";
 
 export const INDEX_PARAMETER_NAMES = new Set(["index", "idx", "i"]);
 
+// Module specifiers whose exports are React's own runtime symbols. Effect-event
+// rules match `useEffectEvent` by NAME (to stay in parity with
+// eslint-plugin-react-hooks, whose fixtures call a bare global), so a same-named
+// hook imported from another package — e.g. `@rocket.chat/fuselage-hooks`, whose
+// `useEffectEvent` is a stable-callback helper meant to be stored and passed as
+// props — is disambiguated by import source before React's semantics apply.
+export const REACT_RUNTIME_MODULE_SOURCES = new Set([
+  "react",
+  "react-dom",
+  "preact/compat",
+  "preact/hooks",
+  "@wordpress/element",
+]);
+
+// React-ecosystem packages whose use*-named exports are REAL React hooks
+// bound by the Rules of Hooks, even though the package isn't a React
+// runtime — state managers, routers, data-fetching libraries. Most of the
+// ecosystem self-identifies by carrying "react" in its package name
+// (react-redux, @tanstack/react-query, react-hook-form, react-router);
+// this set covers the well-known ones that don't. `rules-of-hooks` must
+// NOT exempt imports from these the way it exempts non-React use* helpers
+// (WebdriverIO's `useBrowser`, DI registries, codegen utilities).
+export const REACT_ECOSYSTEM_PACKAGE_NAMES = new Set([
+  "next",
+  "next-themes",
+  "@remix-run/react",
+  "swr",
+  "zustand",
+  "jotai",
+  "recoil",
+  "wouter",
+  "framer-motion",
+  "@apollo/client",
+  "urql",
+  "usehooks-ts",
+]);
+
 export const LOADING_STATE_PATTERN = /^(?:isLoading|isPending)$/;
 
 export const STABLE_HOOK_WRAPPERS = new Set(["useState", "useMemo", "useRef"]);
 
 export const GENERIC_EVENT_SUFFIXES = new Set(["Click", "Change", "Input", "Blur", "Focus"]);
+
+export const UNARY_LISTENER_ARGUMENT_COUNT = 1;
+export const UNARY_LISTENER_HANDLER_ARGUMENT_INDEX = 0;
+export const EVENT_LISTENER_HANDLER_ARGUMENT_INDEX = 1;
+export const WHOLE_RECEIVER_RELEASE_ARGUMENT_COUNT = 0;
+
+export const STATE_UPDATER_INITIAL_PROPERTY_WRITE_RANK = 0;
+export const STATE_UPDATER_INVOCATION_PROPERTY_WRITE_RANK = 1;
+export const STATE_UPDATER_CALL_PROPERTY_WRITE_RANK = 2;
 
 export const TRIVIAL_INITIALIZER_NAMES = new Set([
   "Boolean",
@@ -17,6 +63,29 @@ export const TRIVIAL_INITIALIZER_NAMES = new Set([
   "Object",
   "parseInt",
   "parseFloat",
+]);
+
+// Constructing these built-ins WITH NO ARGUMENTS costs about as much
+// as calling the trivial coercion functions — `useState(new Date())` /
+// `useRef(new Map())` are idiomatic cheap initial values, not the
+// expensive-model construction the lazy-init rules target.
+// Recommending the lazy-init pattern for an empty container is
+// net-negative ceremony. Consumed via
+// `utils/is-trivial-built-in-construction.ts` (which also enforces the
+// zero-argument, identifier-callee shape) by `rerender-lazy-state-init`
+// and `rerender-lazy-ref-init`.
+export const TRIVIAL_CONSTRUCTOR_NAMES: ReadonlySet<string> = new Set([
+  "Date",
+  "Map",
+  "Set",
+  "WeakMap",
+  "WeakSet",
+  "WeakRef",
+  "RegExp",
+  "Error",
+  "URL",
+  "URLSearchParams",
+  "AbortController",
 ]);
 
 // Used by `noDerivedStateEffect` to decide whether a derived-state
@@ -63,6 +132,29 @@ export const HANDLER_FUNCTION_NAME_PATTERN = /^(?:on|handle)[A-Z]/;
 
 export const EFFECT_HOOK_NAMES = new Set(["useEffect", "useLayoutEffect"]);
 export const HOOKS_WITH_DEPS = new Set(["useEffect", "useLayoutEffect", "useMemo", "useCallback"]);
+
+// React's own built-in hooks — the complement of "custom hook" when a
+// callee name already matches the hook naming convention
+// (`isReactHookName`). Includes the bare `use(...)` hook from React 19,
+// which `isReactHookName` matches by exact name.
+export const BUILTIN_HOOK_NAMES: ReadonlySet<string> = new Set([
+  "use",
+  "useState",
+  "useRef",
+  "useMemo",
+  "useCallback",
+  "useReducer",
+  "useContext",
+  "useEffect",
+  "useLayoutEffect",
+  "useInsertionEffect",
+  "useImperativeHandle",
+  "useSyncExternalStore",
+  "useDeferredValue",
+  "useTransition",
+  "useId",
+  "useDebugValue",
+]);
 
 // React's two component-wrapping HOCs that the rule visitor needs to
 // "see through" — `memo(Comp)` and `forwardRef(Comp)`. Both forms
@@ -124,6 +216,11 @@ export const GLOBAL_RELEASE_METHOD_NAMES = new Set([
   "unlisten",
   "unsub",
   "abort",
+  // Observer (`ResizeObserver` et al.) and connection (`WebSocket` /
+  // `EventSource`) release verbs.
+  "disconnect",
+  "unobserve",
+  "close",
 ]);
 
 export const BOUND_RESOURCE_RELEASE_METHOD_NAMES = new Set([

@@ -4,7 +4,7 @@ import {
 } from "../../constants/design.js";
 import { defineRule } from "../../utils/define-rule.js";
 import type { RuleContext } from "../../utils/rule-context.js";
-import { getClassNameLiteral } from "./utils/get-class-name-literal.js";
+import { getStringLiteralAttributeValue } from "../../utils/get-string-literal-attribute-value.js";
 import { collectAxisShorthandPairs } from "./utils/collect-axis-shorthand-pairs.js";
 import { hasResponsivePrefix } from "./utils/has-responsive-prefix.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
@@ -29,8 +29,11 @@ export const noRedundantPaddingAxes = defineRule({
       ) {
         return;
       }
-      const classNameLiteral = getClassNameLiteral(jsxAttribute);
+      const classNameLiteral = getStringLiteralAttributeValue(jsxAttribute);
       if (!classNameLiteral) return;
+      // A collapsible pair needs BOTH axes present, so a class list missing
+      // either substring can never match — bail before any regex work.
+      if (!classNameLiteral.includes("px-") || !classNameLiteral.includes("py-")) return;
       // Per-breakpoint variation is a legit reason to keep the axes split.
       if (
         hasResponsivePrefix(classNameLiteral, "px") ||

@@ -8,6 +8,7 @@ import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import type { RuleContext } from "../../utils/rule-context.js";
+import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import { walkAst } from "../../utils/walk-ast.js";
 
 const isIteratorProducingCall = (
@@ -15,25 +16,26 @@ const isIteratorProducingCall = (
   generatorNamesInFile: ReadonlySet<string>,
 ): boolean => {
   const callee = callExpression.callee;
-  if (
-    isNodeOfType(callee, "MemberExpression") &&
-    isNodeOfType(callee.object, "Identifier") &&
-    callee.object.name === "Iterator" &&
-    isNodeOfType(callee.property, "Identifier") &&
-    callee.property.name === "from"
-  ) {
-    return true;
+  if (isNodeOfType(callee, "MemberExpression")) {
+    const receiver = stripParenExpression(callee.object);
+    if (
+      isNodeOfType(receiver, "Identifier") &&
+      receiver.name === "Iterator" &&
+      isNodeOfType(callee.property, "Identifier") &&
+      callee.property.name === "from"
+    ) {
+      return true;
+    }
+    if (
+      isNodeOfType(callee.property, "Identifier") &&
+      ITERATOR_PRODUCING_METHOD_NAMES.has(callee.property.name)
+    ) {
+      if (isNodeOfType(receiver, "Identifier") && receiver.name === "Object") return false;
+      return true;
+    }
+    return false;
   }
   if (isNodeOfType(callee, "Identifier") && generatorNamesInFile.has(callee.name)) {
-    return true;
-  }
-  if (
-    isNodeOfType(callee, "MemberExpression") &&
-    isNodeOfType(callee.property, "Identifier") &&
-    ITERATOR_PRODUCING_METHOD_NAMES.has(callee.property.name)
-  ) {
-    const receiver = callee.object;
-    if (isNodeOfType(receiver, "Identifier") && receiver.name === "Object") return false;
     return true;
   }
   return false;
@@ -52,10 +54,7 @@ const isReceiverChainIteratorRooted = (
 ): boolean => {
   let cursor: EsTreeNode | null | undefined = receiverNode;
   while (cursor) {
-    if (isNodeOfType(cursor, "ChainExpression")) {
-      cursor = cursor.expression;
-      continue;
-    }
+    cursor = stripParenExpression(cursor);
     if (!isNodeOfType(cursor, "CallExpression")) return false;
     if (isIteratorProducingCall(cursor, generatorNamesInFile)) return true;
     if (!isChainPassThroughCall(cursor)) return false;
@@ -188,10 +187,7 @@ const isStringSplitRootedChain = (receiverNode: EsTreeNode | null | undefined): 
   let hops = 0;
   while (cursor && hops < 12) {
     hops += 1;
-    if (isNodeOfType(cursor, "ChainExpression")) {
-      cursor = cursor.expression;
-      continue;
-    }
+    cursor = stripParenExpression(cursor);
     if (!isNodeOfType(cursor, "CallExpression")) return false;
     const callee = cursor.callee;
     if (!isNodeOfType(callee, "MemberExpression")) return false;
@@ -204,25 +200,29 @@ const isStringSplitRootedChain = (receiverNode: EsTreeNode | null | undefined): 
   return false;
 };
 
-const isSmallLiteralArrayRootedChain = (receiverNode: EsTreeNode | null | undefined): boolean => {
+const isSmallLiteralArray = (node: EsTreeNode): boolean => {
+  if (!isNodeOfType(node, "ArrayExpression")) return false;
+  const elements = node.elements ?? [];
+  if (elements.length === 0 || elements.length > SMALL_LITERAL_ARRAY_MAX_ELEMENTS) {
+    return false;
+  }
+  // No spread elements — those could expand to arbitrary length.
+  for (const element of elements) {
+    if (!element) continue;
+    if (isNodeOfType(element, "SpreadElement")) return false;
+  }
+  return true;
+};
+
+const isSmallLiteralArrayRootedChain = (
+  receiverNode: EsTreeNode | null | undefined,
+  smallConstArrayNames: ReadonlySet<string>,
+): boolean => {
   let cursor: EsTreeNode | null | undefined = receiverNode;
   while (cursor) {
-    if (isNodeOfType(cursor, "ChainExpression")) {
-      cursor = cursor.expression;
-      continue;
-    }
-    if (isNodeOfType(cursor, "ArrayExpression")) {
-      const elements = cursor.elements ?? [];
-      if (elements.length === 0 || elements.length > SMALL_LITERAL_ARRAY_MAX_ELEMENTS) {
-        return false;
-      }
-      // No spread elements — those could expand to arbitrary length.
-      for (const element of elements) {
-        if (!element) continue;
-        if (isNodeOfType(element, "SpreadElement")) return false;
-      }
-      return true;
-    }
+    cursor = stripParenExpression(cursor);
+    if (isNodeOfType(cursor, "ArrayExpression")) return isSmallLiteralArray(cursor);
+    if (isNodeOfType(cursor, "Identifier")) return smallConstArrayNames.has(cursor.name);
     if (!isNodeOfType(cursor, "CallExpression")) return false;
     if (!isChainPassThroughCall(cursor)) return false;
     const nextCallee = cursor.callee;
@@ -230,6 +230,28 @@ const isSmallLiteralArrayRootedChain = (receiverNode: EsTreeNode | null | undefi
     cursor = nextCallee.object;
   }
   return false;
+};
+
+// `const OPTIONS = [{…}, {…}, {…}]` at module scope, then
+// `OPTIONS.filter(…).map(…)` — the receiver is provably a fixed
+// small array, same tiny-N carve-out as an inline literal.
+const collectSmallConstArrayNames = (programNode: EsTreeNode): Set<string> => {
+  const names = new Set<string>();
+  const statements = (programNode as EsTreeNodeOfType<"Program">).body ?? [];
+  for (const statement of statements) {
+    const declaration = isNodeOfType(statement, "ExportNamedDeclaration")
+      ? statement.declaration
+      : statement;
+    if (!declaration || !isNodeOfType(declaration, "VariableDeclaration")) continue;
+    if (declaration.kind !== "const") continue;
+    for (const declarator of declaration.declarations ?? []) {
+      if (!isNodeOfType(declarator, "VariableDeclarator")) continue;
+      if (!isNodeOfType(declarator.id, "Identifier")) continue;
+      if (!declarator.init || !isSmallLiteralArray(declarator.init as EsTreeNode)) continue;
+      names.add(declarator.id.name);
+    }
+  }
+  return names;
 };
 
 const collectGeneratorNames = (programNode: EsTreeNode): Set<string> => {
@@ -265,12 +287,25 @@ export const jsCombineIterations = defineRule({
   create: (context: RuleContext) => {
     let programNode: EsTreeNode | null = null;
     let generatorNamesInFile: ReadonlySet<string> | null = null;
+    let smallConstArrayNames: ReadonlySet<string> | null = null;
+    // One report per fluent chain. `a.filter(x).map(y).filter(z)` has two
+    // adjacent chainable pairs and used to report both — the advice
+    // ("combine into one pass") is identical, so the second diagnostic is
+    // pure noise (prod telemetry review 2026-07: same chain, same line,
+    // reported twice). Pre-order traversal reaches the outermost pair
+    // first; once it reports (or is itself covered), every inner call of
+    // the same chain is marked covered.
+    const coveredChainCalls = new WeakSet<EsTreeNode>();
     // Collecting generator names walks the whole program, and the set only
     // matters once a chained-iteration candidate survives the guards below —
     // most files never get that far, so the walk is deferred to first use.
     const getGeneratorNamesInFile = (): ReadonlySet<string> => {
       generatorNamesInFile ??= programNode ? collectGeneratorNames(programNode) : new Set();
       return generatorNamesInFile;
+    };
+    const getSmallConstArrayNames = (): ReadonlySet<string> => {
+      smallConstArrayNames ??= programNode ? collectSmallConstArrayNames(programNode) : new Set();
+      return smallConstArrayNames;
     };
 
     return {
@@ -287,7 +322,7 @@ export const jsCombineIterations = defineRule({
         const outerMethod = node.callee.property.name;
         if (!CHAINABLE_ITERATION_METHODS.has(outerMethod)) return;
 
-        const innerCall = node.callee.object;
+        const innerCall = stripParenExpression(node.callee.object);
         if (
           !isNodeOfType(innerCall, "CallExpression") ||
           !isNodeOfType(innerCall.callee, "MemberExpression") ||
@@ -297,6 +332,11 @@ export const jsCombineIterations = defineRule({
 
         const innerMethod = innerCall.callee.property.name;
         if (!CHAINABLE_ITERATION_METHODS.has(innerMethod)) return;
+
+        if (coveredChainCalls.has(node as EsTreeNode)) {
+          coveredChainCalls.add(innerCall as EsTreeNode);
+          return;
+        }
 
         if (
           outerMethod === "filter" &&
@@ -332,9 +372,11 @@ export const jsCombineIterations = defineRule({
 
         if (isReceiverChainIteratorRooted(innerCall.callee.object, getGeneratorNamesInFile()))
           return;
-        if (isSmallLiteralArrayRootedChain(innerCall.callee.object)) return;
+        if (isSmallLiteralArrayRootedChain(innerCall.callee.object, getSmallConstArrayNames()))
+          return;
         if (isStringSplitRootedChain(innerCall.callee.object)) return;
 
+        coveredChainCalls.add(innerCall as EsTreeNode);
         context.report({
           node,
           message: `This loops over your list twice because .${innerMethod}().${outerMethod}() makes two passes, so do it in one pass with .reduce() or a for...of loop`,

@@ -1,9 +1,8 @@
 import { defineRule } from "../../utils/define-rule.js";
-import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
-import { getCalleeName } from "../../utils/get-callee-name.js";
-import { isHookCall } from "../../utils/is-hook-call.js";
+import { isReactHookCall } from "../../utils/is-react-hook-call.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import { isGlobalNanValue } from "../../utils/is-global-nan-value.js";
 
 // Hooks whose tail (or trailing) argument is an explicit dependency array.
 // Notably excludes `@preact/signals`'s `useSignalEffect(callback)` — it
@@ -22,21 +21,6 @@ const HOOKS_WITH_DEP_ARRAY = new Set([
 
 const NAN_MESSAGE =
   "`NaN` in a dependency array never compares as changed with `Object.is`, so normalize the value before passing it as a dependency.";
-
-const isNanLiteral = (node: EsTreeNode): boolean => {
-  if (isNodeOfType(node, "Identifier") && node.name === "NaN") return true;
-  if (
-    isNodeOfType(node, "MemberExpression") &&
-    !node.computed &&
-    isNodeOfType(node.object, "Identifier") &&
-    node.object.name === "Number" &&
-    isNodeOfType(node.property, "Identifier") &&
-    node.property.name === "NaN"
-  ) {
-    return true;
-  }
-  return false;
-};
 
 // Mirrors the runtime check in `preact/debug/src/debug.js`:
 //   if (isNaN(arg)) {
@@ -65,14 +49,13 @@ export const hooksNoNanInDeps = defineRule({
     "Remove `NaN` (or `Number.NaN`) from the dependency array. If a value can be NaN at runtime, normalise it (`Number.isNaN(x) ? 0 : x`) before passing it.",
   create: (context) => ({
     CallExpression(node: EsTreeNodeOfType<"CallExpression">) {
-      if (!isHookCall(node, HOOKS_WITH_DEP_ARRAY)) return;
-      const calleeName = getCalleeName(node);
-      const depsIndex = calleeName === "useImperativeHandle" ? 2 : 1;
+      if (!isReactHookCall(node, HOOKS_WITH_DEP_ARRAY, context.scopes)) return;
+      const depsIndex = isReactHookCall(node, "useImperativeHandle", context.scopes) ? 2 : 1;
       const depsArgument = node.arguments[depsIndex];
       if (!depsArgument || !isNodeOfType(depsArgument, "ArrayExpression")) return;
       for (const element of depsArgument.elements) {
         if (!element) continue;
-        if (isNanLiteral(element)) {
+        if (isGlobalNanValue(element, context.scopes)) {
           context.report({ node: element, message: NAN_MESSAGE });
         }
       }

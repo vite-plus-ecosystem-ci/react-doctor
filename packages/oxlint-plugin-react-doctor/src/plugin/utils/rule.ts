@@ -1,3 +1,4 @@
+import type { Capability, CapabilityQuery } from "./capability.js";
 import type { FileScan } from "./file-scan.js";
 import type { RuleContext } from "./rule-context.js";
 import type { RuleVisitors } from "./rule-visitors.js";
@@ -48,17 +49,29 @@ export interface Rule {
   // `"react:19"`, `"nextjs"`, `"tailwind:3.4"`) that ALL must be satisfied
   // for the rule to be enabled. Omit for rules that always apply once
   // their framework gate is met.
-  requires?: ReadonlyArray<string>;
+  requires?: ReadonlyArray<Capability>;
+  minimumInkVersion?: string;
   // Inverse of `requires`: list of capability tokens whose presence
   // DISABLES the rule. Used for rules that become irrelevant when a
   // project ships with React Compiler (auto-memoization makes the four
   // `jsx-no-new-*-as-prop` perf rules unnecessary, for example). If
   // ANY listed capability is present the rule is skipped.
-  disabledBy?: ReadonlyArray<string>;
+  disabledWhen?: ReadonlyArray<Capability>;
   // Behavioral tags (e.g. `"test-noise"`, `"design"`) consumed by
   // `--ignore-tag` / `shouldEnableRule` to opt families of rules in
   // or out of a scan independently of the framework gate.
   tags?: ReadonlyArray<string>;
+  // When `true`, a finding's identity is the flagged element itself (a
+  // missing attribute, a wrong element) rather than the flagged line's
+  // text, so reformatting the line doesn't change the finding. The CI
+  // baseline delta (`computeDiagnosticDelta` in @react-doctor/core)
+  // then matches these by `(file, rule)` occurrence count instead of a
+  // line-text hash. Rules in the `Accessibility` category get this
+  // behavior implicitly; set the flag only on element-level rules
+  // outside that category. Leave unset for expression-level rules, where
+  // the flagged expression IS the finding and a text change means a new
+  // one.
+  matchByOccurrence?: boolean;
   // When `false`, the rule is registered in the plugin (importable,
   // configurable, testable) but NOT enabled by default — users must
   // opt in via `severityControls.rules["react-doctor/<id>"]`. Used for
@@ -81,5 +94,11 @@ export interface Rule {
   // this without coupling the host to specific rule ids.
   committedFilesOnly?: boolean;
   recommendation?: string;
+  // Capability-conditioned override of `recommendation`, evaluated by
+  // @react-doctor/core's diagnostic pipeline where the scanned project's
+  // capability set is known. Return `undefined` to fall back to the static
+  // `recommendation` (which stays the project-agnostic prose that docs,
+  // the rule catalog, and LSP hover render).
+  recommendationFor?: (hasCapability: CapabilityQuery) => string | undefined;
   create: (context: RuleContext) => RuleVisitors;
 }

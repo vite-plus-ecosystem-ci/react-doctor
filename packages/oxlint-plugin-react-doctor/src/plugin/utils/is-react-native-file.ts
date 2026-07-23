@@ -1,4 +1,8 @@
-import { classifyPackagePlatform } from "./classify-package-platform.js";
+import {
+  classifyPackagePlatform,
+  findNearestPackageDirectory,
+} from "./classify-package-platform.js";
+import { isPackageWithinProjectRoot } from "./is-package-within-project-root.js";
 import { normalizeFilename } from "./normalize-filename.js";
 import { getReactDoctorStringSetting } from "./get-react-doctor-setting.js";
 import type { RuleContext } from "./rule-context.js";
@@ -29,8 +33,14 @@ const NATIVE_FILE_EXTENSION_PATTERN = /\.(?:ios|android|native)\.[cm]?[jt]sx?$/;
 //   2. Filename ends with a web extension (`.web.tsx`) → "web".
 //   3. Nearest package.json classifies as "web" → "web".
 //   4. Nearest package.json classifies as "expo" or "react-native" → "react-native".
-//   5. Nearest package.json classifies as "unknown" → fall back to the
-//      project-level framework setting:
+//   5. Nearest package.json classifies as "neutral" (declares dependencies,
+//      none of them RN or a web framework) AND sits below the project root
+//      (a nested workspace package) → "web". The package's own manifest is
+//      the authority: a monorepo package that never depends on react-native
+//      must not get RN rules just because a sibling workspace does.
+//   6. Nearest package.json classifies as "unknown" (or "neutral" at the
+//      project root itself) → fall back to the project-level framework
+//      setting:
 //      • `react-native` or `expo` → "react-native"
 //      • any other known framework (`nextjs`, `vite`, `cra`, `remix`,
 //        `gatsby`, `tanstack-start`) → "web"
@@ -57,6 +67,16 @@ export const classifyReactNativeFileTarget = (context: RuleContext): ReactNative
   const packagePlatform = classifyPackagePlatform(filename);
   if (packagePlatform === "web") return "web";
   if (packagePlatform === "expo" || packagePlatform === "react-native") return "react-native";
+  if (packagePlatform === "neutral") {
+    const packageDirectory = findNearestPackageDirectory(filename);
+    const rootDirectory = getReactDoctorStringSetting(context.settings, "rootDirectory");
+    if (
+      packageDirectory !== null &&
+      isPackageWithinProjectRoot(packageDirectory, rootDirectory, false)
+    ) {
+      return "web";
+    }
+  }
 
   const framework = getReactDoctorStringSetting(context.settings, "framework");
   if (framework === "react-native" || framework === "expo") return "react-native";

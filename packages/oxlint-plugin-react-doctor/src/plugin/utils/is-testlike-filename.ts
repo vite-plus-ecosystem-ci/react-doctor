@@ -4,13 +4,18 @@
 const NON_PRODUCTION_PATH_SEGMENTS: ReadonlyArray<string> = [
   "/test/",
   "/tests/",
+  "/testing/",
   "/__tests__/",
   "/__test__/",
   "/__fixtures__/",
   "/fixtures/",
   "/__mocks__/",
   "/mocks/",
+  "/testUtils/",
+  "/test-utils/",
+  "/testutils/",
   "/cypress/",
+  "/playwright/",
   "/.storybook/",
   "/.dumi/",
   "/stories/",
@@ -60,8 +65,8 @@ const NON_PRODUCTION_PATH_SEGMENTS: ReadonlyArray<string> = [
 ];
 
 // True iff `filename` looks like test / spec / Storybook / Cypress /
-// benchmark / e2e code — by suffix (`.test.tsx`, `.spec.ts`, `.cy.tsx`,
-// `.stories.tsx`, `.bench.ts`, `.e2e.ts`, `.story.ts`) or by sitting
+// benchmark / e2e / docs-demo code — by suffix (`.test.tsx`, `.spec.ts`,
+// `.cy.tsx`, `.stories.tsx`, `.bench.ts`, `.e2e.ts`, `.story.ts`) or by sitting
 // inside a recognized test/fixture directory. Used by rules whose
 // findings are unactionable in non-production code (a11y rules, perf
 // rules, Fast-Refresh-only-export rules) to skip those files entirely
@@ -78,6 +83,7 @@ const NON_PRODUCTION_FILENAME_SUFFIXES: ReadonlyArray<string> = [
   ".integration-spec.",
   ".int-spec.",
   ".mock.",
+  ".mocks.",
   ".fixture.",
 ];
 
@@ -219,7 +225,15 @@ export const isTestlikeFilename = (rawFilename: string | undefined): boolean => 
   return lastResult;
 };
 
-const computeIsTestlikeFilename = (rawFilename: string): boolean => {
+export const isTestlikeFilenameIgnoringPathSegments = (
+  rawFilename: string | undefined,
+  ignoredPathSegments: ReadonlySet<string>,
+): boolean => (rawFilename ? computeIsTestlikeFilename(rawFilename, ignoredPathSegments) : false);
+
+const computeIsTestlikeFilename = (
+  rawFilename: string,
+  ignoredPathSegments: ReadonlySet<string> = new Set(),
+): boolean => {
   const filename = rawFilename.replaceAll("\\", "/");
   const lastSlash = filename.lastIndexOf("/");
   const basename = lastSlash === -1 ? filename : filename.slice(lastSlash + 1);
@@ -235,6 +249,7 @@ const computeIsTestlikeFilename = (rawFilename: string): boolean => {
   // slash-prefixed `/.dumi/` segment.
   const rootedFilename = filename.startsWith("/") ? filename : `/${filename}`;
   for (const dotDirectorySegment of DOT_PREFIXED_NON_PRODUCTION_PATH_SEGMENTS) {
+    if (ignoredPathSegments.has(dotDirectorySegment)) continue;
     if (rootedFilename.includes(dotDirectorySegment)) return true;
   }
   // The PATH-segment check scopes itself to "below the source root":
@@ -250,6 +265,7 @@ const computeIsTestlikeFilename = (rawFilename: string): boolean => {
   // path, before the source-root cut hides them.
   const scopedFilename = sliceBelowSourceRoot(filename);
   for (const segment of NON_PRODUCTION_PATH_SEGMENTS) {
+    if (ignoredPathSegments.has(segment)) continue;
     const haystack = segment.startsWith("/.") ? filename : scopedFilename;
     if (haystack.includes(segment)) return true;
   }

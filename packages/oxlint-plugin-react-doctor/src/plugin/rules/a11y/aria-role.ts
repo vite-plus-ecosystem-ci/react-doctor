@@ -4,6 +4,7 @@ import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { getElementType } from "../../utils/get-element-type.js";
+import { getJsxPropStaticStringValues } from "../../utils/get-jsx-prop-static-string-values.js";
 import { hasJsxPropIgnoreCase } from "../../utils/has-jsx-prop-ignore-case.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 
@@ -23,9 +24,16 @@ const resolveSettings = (
     typeof reactDoctor === "object" && reactDoctor !== null
       ? ((reactDoctor as { ariaRole?: AriaRoleSettings }).ariaRole ?? {})
       : {};
+  // Default to `true`: a `role` prop on a CUSTOM component is very
+  // often a domain prop (chat message role, workspace member role,
+  // hook option), not the DOM ARIA attribute — and `role={undefined}`
+  // on MUI wrappers is the documented pattern for clearing a default
+  // role. When the component does forward `role` to a DOM element,
+  // the rule still fires at that element inside the component. In the
+  // verify corpus every custom-component hit was a false positive.
   return {
     allowedInvalidRoles: ruleSettings.allowedInvalidRoles ?? [],
-    ignoreNonDOM: ruleSettings.ignoreNonDOM ?? false,
+    ignoreNonDOM: ruleSettings.ignoreNonDOM ?? true,
   };
 };
 
@@ -46,6 +54,29 @@ export const ariaRole = defineRule({
         if (!roleAttribute) return;
         const elementType = getElementType(node, context.settings);
         if (settings.ignoreNonDOM && !HTML_TAGS.has(elementType)) return;
+
+        // Reports the first invalid candidate and stops: for a ternary,
+        // each branch is independently a bug when taken, so ANY invalid
+        // candidate is worth reporting.
+        const reportFirstInvalidCandidate = (candidates: ReadonlyArray<string>): void => {
+          for (const candidate of candidates) {
+            if (candidate.trim().length === 0) {
+              context.report({ node: roleAttribute, message: buildBaseMessage("") });
+              return;
+            }
+            const tokens = candidate.split(/\s+/).filter((token) => token.length > 0);
+            for (const token of tokens) {
+              if (!VALID_ARIA_ROLES.has(token) && !settings.allowedInvalidRoles.includes(token)) {
+                context.report({
+                  node: roleAttribute,
+                  message: buildBaseMessage(` \`${token}\` is not one.`),
+                });
+                return;
+              }
+            }
+          }
+        };
+
         const value = roleAttribute.value as EsTreeNode | null;
         if (!value) {
           context.report({ node: roleAttribute, message: buildBaseMessage("") });
@@ -56,21 +87,7 @@ export const ariaRole = defineRule({
             context.report({ node: roleAttribute, message: buildBaseMessage("") });
             return;
           }
-          const stringValue = value.value;
-          if (stringValue.trim().length === 0) {
-            context.report({ node: roleAttribute, message: buildBaseMessage("") });
-            return;
-          }
-          const tokens = stringValue.split(/\s+/).filter((token) => token.length > 0);
-          for (const token of tokens) {
-            if (!VALID_ARIA_ROLES.has(token) && !settings.allowedInvalidRoles.includes(token)) {
-              context.report({
-                node: roleAttribute,
-                message: buildBaseMessage(` \`${token}\` is not one.`),
-              });
-              return;
-            }
-          }
+          reportFirstInvalidCandidate([value.value]);
           return;
         }
         if (isNodeOfType(value, "JSXExpressionContainer")) {
@@ -87,6 +104,11 @@ export const ariaRole = defineRule({
             (expression as EsTreeNodeOfType<"Identifier">).name === "undefined"
           ) {
             context.report({ node: roleAttribute, message: buildBaseMessage("") });
+            return;
+          }
+          const resolvedCandidates = getJsxPropStaticStringValues(roleAttribute, context.scopes);
+          if (resolvedCandidates !== null) {
+            reportFirstInvalidCandidate(resolvedCandidates);
             return;
           }
           // Dynamic expression — assumed valid.

@@ -1,4 +1,3 @@
-import { MUTATING_ARRAY_METHODS, MUTATING_COLLECTION_METHODS } from "../../constants/js.js";
 import { REDUCER_PATH_STATE_LIMIT } from "../../constants/thresholds.js";
 import { collectPatternNames } from "../../utils/collect-pattern-names.js";
 import { defineRule } from "../../utils/define-rule.js";
@@ -7,9 +6,14 @@ import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
+import {
+  collectMutableStateReferenceMutations,
+  updateMutableStateReferencesForIdentifierAssignment,
+  updateMutableStateReferencesForVariableDeclaration,
+  type MutableStateReferenceMutation,
+} from "../../utils/mutable-state-reference-analysis.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
-import { walkAst } from "../../utils/walk-ast.js";
 import { isLodashMutatorCall } from "./utils/lodash-mutator-call.js";
 import { resolveReducerFunction } from "./utils/resolve-reducer-function.js";
 import { getStaticMemberPropertyName } from "./utils/static-member-property-name.js";
@@ -17,12 +21,6 @@ import { getStaticMemberPropertyName } from "./utils/static-member-property-name
 const MESSAGE = "This reducer changes state in place, so your update is silently skipped.";
 
 const SAME_REFERENCE_ARRAY_RETURN_METHODS = new Set(["copyWithin", "fill", "reverse", "sort"]);
-
-const SAME_REFERENCE_COLLECTION_RETURN_METHODS = new Set(["add", "set"]);
-
-const OBJECT_MUTATION_METHODS = new Set(["assign", "defineProperties", "defineProperty"]);
-
-const REFLECT_MUTATION_METHODS = new Set(["deleteProperty", "set"]);
 
 // React reducer state is compared by identity (`Object.is`). A reducer may
 // legitimately return the previous state object for no-op actions, and it may
@@ -96,10 +94,6 @@ const REFLECT_MUTATION_METHODS = new Set(["deleteProperty", "set"]);
 // reachability are approximated because mutation collection walks their AST
 // without modeling every execution path. Add CFG-backed path analysis before
 // treating those cases as precise.
-interface ReducerStateMutation {
-  node: EsTreeNode;
-}
-
 interface ReducerPathState {
   // Names that refer to the original reducer state object, so returning one
   // of them returns the same top-level reference React compares with Object.is.
@@ -107,7 +101,7 @@ interface ReducerPathState {
   // Names that refer to either the original state object or data reachable
   // from it. Mutating any of these mutates the previous reducer state.
   mutableStateSourceNames: Set<string>;
-  mutations: ReducerStateMutation[];
+  mutations: MutableStateReferenceMutation[];
 }
 
 const cloneReducerPathState = (state: ReducerPathState): ReducerPathState => ({
@@ -181,37 +175,6 @@ const isCallToImportedReactUseReducer = (node: EsTreeNodeOfType<"CallExpression"
 // We resolve the identifier through `findVariableInitializer`: if it
 // has a same-file binding the static call is treated as opaque and
 // skipped. Only an unresolved (i.e. global) name passes through.
-const isStaticMethodCallOnNamedObject = (
-  node: EsTreeNode,
-  objectName: string,
-  methodNames: ReadonlySet<string>,
-): boolean => {
-  const unwrappedNode = stripParenExpression(node);
-  if (!isNodeOfType(unwrappedNode, "CallExpression")) return false;
-  if (!isNodeOfType(unwrappedNode.callee, "MemberExpression")) return false;
-  const calleeObject = unwrappedNode.callee.object;
-  if (!isNodeOfType(calleeObject, "Identifier")) return false;
-  if (calleeObject.name !== objectName) return false;
-  if (!methodNames.has(getStaticMemberPropertyName(unwrappedNode.callee) ?? "")) return false;
-  // If the global name is shadowed by an in-scope binding, abstain.
-  const shadow = findVariableInitializer(calleeObject, calleeObject.name);
-  if (shadow) return false;
-  return true;
-};
-
-// Determines whether an expression's root identifier is known to be the
-// original reducer state, an alias to it, or a value reachable from it.
-const isExpressionRootedInMutableReducerStateSource = (
-  node: EsTreeNode,
-  state: ReducerPathState,
-): boolean => {
-  let current: EsTreeNode | null | undefined = stripParenExpression(node);
-  while (current && isNodeOfType(current, "MemberExpression")) {
-    current = stripParenExpression(current.object);
-  }
-  return isNodeOfType(current, "Identifier") && state.mutableStateSourceNames.has(current.name);
-};
-
 const isExpressionOriginalReducerStateReference = (
   node: EsTreeNode | null | undefined,
   state: ReducerPathState,
@@ -226,19 +189,6 @@ const isExpressionOriginalReducerStateReference = (
 
 // Captures assignments like `const items = state.items`, where mutating `items`
 // still mutates data reachable from the original reducer state.
-const isExpressionReachableFromOriginalReducerState = (
-  node: EsTreeNode | null | undefined,
-  state: ReducerPathState,
-): boolean => {
-  if (!node) return false;
-  if (isExpressionOriginalReducerStateReference(node, state)) return true;
-  const unwrappedNode = stripParenExpression(node);
-  return (
-    isNodeOfType(unwrappedNode, "MemberExpression") &&
-    isExpressionRootedInMutableReducerStateSource(unwrappedNode, state)
-  );
-};
-
 // Detects whether a return expression can hand React the original state object
 // back, including conditional/logical expressions and APIs that return their
 // receiver or first argument.
@@ -282,16 +232,14 @@ const canExpressionReturnOriginalReducerStateReference = (
       ) {
         return true;
       }
-      // Map#set and Set#add return the collection receiver. Only count this as
-      // a top-level same-reference return when the receiver itself is the
-      // reducer state reference, not merely a nested collection in a new wrapper.
-      if (
-        methodName &&
-        SAME_REFERENCE_COLLECTION_RETURN_METHODS.has(methodName) &&
-        isExpressionOriginalReducerStateReference(unwrappedNode.callee.object, state)
-      ) {
-        return true;
-      }
+      // `return state.set(k, v)` / `return state.add(v)` is deliberately NOT
+      // treated as a same-reference return: on an immutable-API collection
+      // (Immutable.js Map, Mori) `.set`/`.add` return a NEW collection and
+      // returning it is the CORRECT reducer shape. Distinguishing that from a
+      // native Map/Set (where the receiver comes back) needs type info the
+      // lint pipeline doesn't have, and the immutable idiom dominates
+      // return-position collection calls in reducers (see the consumed-result
+      // escape in `collectReducerStateMutationsInExpressionOrStatement`).
     }
   }
 
@@ -328,127 +276,13 @@ const canExpressionReturnOriginalReducerStateReference = (
   return false;
 };
 
-// Walks one statement/expression and records direct mutations of the original
-// reducer state, aliases to it, or values reachable from it.
 const collectReducerStateMutationsInExpressionOrStatement = (
   node: EsTreeNode,
   state: ReducerPathState,
-): ReducerStateMutation[] => {
-  // Nested reducer-local helpers are declarations, not code that runs on this
-  // path. Their bodies may mutate a parameter named `state`, but that is a
-  // different binding and should not be attributed to the outer reducer path.
-  if (isFunctionLike(node)) return [];
-  const mutations: ReducerStateMutation[] = [];
-  walkAst(node, (child: EsTreeNode) => {
-    const unwrappedChild = stripParenExpression(child);
-    // Prune nested function bodies for the same reason: only collect mutations
-    // that execute in the currently analyzed reducer path.
-    if (child !== node && isFunctionLike(unwrappedChild)) return false;
-
-    if (isNodeOfType(unwrappedChild, "AssignmentExpression")) {
-      // Direct property writes mutate the previous state when their left-hand
-      // side is rooted in the original state or a state-derived alias:
-      //
-      //   state.count = 1;
-      //   alias.items[index] = item;
-      if (
-        isNodeOfType(stripParenExpression(unwrappedChild.left), "MemberExpression") &&
-        isExpressionRootedInMutableReducerStateSource(unwrappedChild.left, state)
-      ) {
-        mutations.push({ node: unwrappedChild });
-      }
-      return;
-    }
-
-    if (isNodeOfType(unwrappedChild, "UpdateExpression")) {
-      // Updates are writes too:
-      //
-      //   state.count++;
-      //   --alias.count;
-      if (
-        isNodeOfType(stripParenExpression(unwrappedChild.argument), "MemberExpression") &&
-        isExpressionRootedInMutableReducerStateSource(unwrappedChild.argument, state)
-      ) {
-        mutations.push({ node: unwrappedChild });
-      }
-      return;
-    }
-
-    if (isNodeOfType(unwrappedChild, "UnaryExpression") && unwrappedChild.operator === "delete") {
-      // Deleting a property mutates the containing object:
-      //
-      //   delete state.items[id];
-      if (
-        isNodeOfType(stripParenExpression(unwrappedChild.argument), "MemberExpression") &&
-        isExpressionRootedInMutableReducerStateSource(unwrappedChild.argument, state)
-      ) {
-        mutations.push({ node: unwrappedChild });
-      }
-      return;
-    }
-
-    if (!isNodeOfType(unwrappedChild, "CallExpression")) return;
-    const firstArgument = unwrappedChild.arguments?.[0];
-    // Built-in object APIs mutate their first argument:
-    //
-    //   Object.assign(state, patch);
-    //   Reflect.set(state, key, value);
-    //
-    // Only count them when that first argument is rooted in reducer state.
-    if (
-      firstArgument &&
-      isExpressionRootedInMutableReducerStateSource(firstArgument, state) &&
-      (isStaticMethodCallOnNamedObject(unwrappedChild, "Object", OBJECT_MUTATION_METHODS) ||
-        isStaticMethodCallOnNamedObject(unwrappedChild, "Reflect", REFLECT_MUTATION_METHODS))
-    ) {
-      mutations.push({ node: unwrappedChild });
-      return;
-    }
-    // Lodash mutators take the target object as their first argument:
-    //
-    //   _.set(state, "user.name", "Ada");
-    //   set(state, "user.name", "Ada");
-    //
-    // Resolved via `findVariableInitializer` so we only fire when the
-    // callee resolves back to an import from the mutating lodash
-    // package (NOT lodash/fp, which is non-mutating).
-    if (
-      firstArgument &&
-      isExpressionRootedInMutableReducerStateSource(firstArgument, state) &&
-      isLodashMutatorCall(unwrappedChild)
-    ) {
-      mutations.push({ node: unwrappedChild });
-      return;
-    }
-    if (!isNodeOfType(unwrappedChild.callee, "MemberExpression")) return;
-    const methodName = getStaticMemberPropertyName(unwrappedChild.callee);
-    // Receiver-mutating methods mutate the object/array/collection they are
-    // called on. We only record them when the receiver is state-derived:
-    //
-    //   state.items.push(item);
-    //   items.splice(index, 1);
-    //   stateMap.set(key, value);
-    //
-    // Collection method names like `set` and `add` are assumed mutating
-    // when called on state-derived values. The residual false-positive
-    // risk is when state holds a custom immutable-API value whose
-    // `.set`/`.add`/`.delete` return a NEW container (Immutable.js
-    // Map, Mori, persistent collections). Distinguishing those from
-    // Map/Set requires TS type info which the lint pipeline doesn't
-    // have. In practice the discard-the-result-of-an-immutable-API
-    // pattern is itself a bug, so this rule's diagnostic still points
-    // at code that needs attention.
-    if (
-      !methodName ||
-      (!MUTATING_ARRAY_METHODS.has(methodName) && !MUTATING_COLLECTION_METHODS.has(methodName))
-    )
-      return;
-    if (isExpressionRootedInMutableReducerStateSource(unwrappedChild.callee.object, state)) {
-      mutations.push({ node: unwrappedChild });
-    }
+): MutableStateReferenceMutation[] =>
+  collectMutableStateReferenceMutations(node, state, {
+    isAdditionalMutatingCall: isLodashMutatorCall,
   });
-  return mutations;
-};
 
 const collectBlockScopedBindingNames = (
   blockStatement: EsTreeNodeOfType<"BlockStatement">,
@@ -485,93 +319,19 @@ const restoreOuterIdentityForBlockScopedNames = (
   return nextState;
 };
 
-// Walks a destructure pattern, marking each binding as reachable
-// from the reducer state when the surrounding initializer is itself
-// reachable. The names added to `mutableStateSourceNames` lose their
-// original-identity status: `const { items } = state` means
-// `items === state.items`, which is reachable but NOT the same
-// top-level reference React compares — only mutations through it
-// matter.
-//
-// Conservative scope: only ObjectPattern + ArrayPattern with
-// Identifier / AssignmentPattern leaves. Nested patterns (e.g.
-// `const { a: { b } } = state`) are NOT modelled — those rebind
-// `b` to `state.a.b`, also reachable, but the second-level recursion
-// adds noise without a clear win. The single-level case is the
-// canonical Redux reducer pattern.
-const recordDestructuredAliasNames = (pattern: EsTreeNode, state: ReducerPathState): void => {
-  if (isNodeOfType(pattern, "ObjectPattern")) {
-    for (const property of pattern.properties ?? []) {
-      if (!isNodeOfType(property, "Property")) continue;
-      const valueNode = property.value;
-      // `const { items } = state`         (shorthand)        → Identifier
-      // `const { items: localItems } = state`               → Identifier
-      // `const { items = [] } = state`                     → AssignmentPattern wrapping Identifier
-      // `const { items: localItems = [] } = state`         → AssignmentPattern wrapping Identifier
-      let leafIdentifier: EsTreeNodeOfType<"Identifier"> | null = null;
-      if (isNodeOfType(valueNode, "Identifier")) {
-        leafIdentifier = valueNode;
-      } else if (
-        isNodeOfType(valueNode, "AssignmentPattern") &&
-        isNodeOfType(valueNode.left, "Identifier")
-      ) {
-        leafIdentifier = valueNode.left;
-      }
-      if (!leafIdentifier) continue;
-      state.mutableStateSourceNames.add(leafIdentifier.name);
-    }
-    return;
-  }
-  if (isNodeOfType(pattern, "ArrayPattern")) {
-    for (const element of pattern.elements ?? []) {
-      if (!element) continue;
-      if (isNodeOfType(element, "Identifier")) {
-        state.mutableStateSourceNames.add(element.name);
-        continue;
-      }
-      if (isNodeOfType(element, "AssignmentPattern") && isNodeOfType(element.left, "Identifier")) {
-        state.mutableStateSourceNames.add(element.left.name);
-        continue;
-      }
-      if (isNodeOfType(element, "RestElement") && isNodeOfType(element.argument, "Identifier")) {
-        // `const [first, ...rest] = state.items` — `rest` is a fresh
-        // array (slice copy at runtime), not reachable from state.
-        // Intentionally NOT added.
-      }
-    }
-  }
-};
-
 const updateReducerStateIdentityForVariableDeclaration = (
   declaration: EsTreeNodeOfType<"VariableDeclaration">,
   state: ReducerPathState,
 ): void => {
+  updateMutableStateReferencesForVariableDeclaration(declaration, state);
   for (const declarator of declaration.declarations ?? []) {
     if (isNodeOfType(declarator.id, "Identifier")) {
       const name = declarator.id.name;
       state.originalStateReferenceNames.delete(name);
-      state.mutableStateSourceNames.delete(name);
 
       if (isExpressionOriginalReducerStateReference(declarator.init, state)) {
         state.originalStateReferenceNames.add(name);
-        state.mutableStateSourceNames.add(name);
-        continue;
       }
-
-      if (isExpressionReachableFromOriginalReducerState(declarator.init, state)) {
-        state.mutableStateSourceNames.add(name);
-      }
-      continue;
-    }
-
-    // Destructure off the original state object (or anything reachable from
-    // it). Each top-level binding becomes a new alias reachable from state.
-    if (
-      (isNodeOfType(declarator.id, "ObjectPattern") ||
-        isNodeOfType(declarator.id, "ArrayPattern")) &&
-      isExpressionReachableFromOriginalReducerState(declarator.init, state)
-    ) {
-      recordDestructuredAliasNames(declarator.id, state);
     }
   }
 };
@@ -583,18 +343,12 @@ const updateReducerStateIdentityForIdentifierAssignment = (
   state: ReducerPathState,
 ): void => {
   if (!isNodeOfType(assignment.left, "Identifier")) return;
+  updateMutableStateReferencesForIdentifierAssignment(assignment, state);
   const name = assignment.left.name;
   state.originalStateReferenceNames.delete(name);
-  state.mutableStateSourceNames.delete(name);
 
   if (isExpressionOriginalReducerStateReference(assignment.right, state)) {
     state.originalStateReferenceNames.add(name);
-    state.mutableStateSourceNames.add(name);
-    return;
-  }
-
-  if (isExpressionReachableFromOriginalReducerState(assignment.right, state)) {
-    state.mutableStateSourceNames.add(name);
   }
 };
 
@@ -630,7 +384,7 @@ const analyzeReactUseReducerFunctionForStateMutation = (
       : null;
   if (!stateName) return;
 
-  const reportReducerStateMutations = (mutations: ReducerStateMutation[]): void => {
+  const reportReducerStateMutations = (mutations: MutableStateReferenceMutation[]): void => {
     if (mutations.length === 0) return;
 
     if (options.crossFileConsumerCallSite && options.crossFileSourceDisplay) {

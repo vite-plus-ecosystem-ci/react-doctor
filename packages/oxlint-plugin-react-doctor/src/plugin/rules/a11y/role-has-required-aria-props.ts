@@ -2,8 +2,10 @@ import { HTML_TAGS } from "../../constants/html-tags.js";
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { getElementType } from "../../utils/get-element-type.js";
+import { getJsxPropStaticStringValues } from "../../utils/get-jsx-prop-static-string-values.js";
 import { getJsxPropStringValue } from "../../utils/get-jsx-prop-string-value.js";
 import { hasJsxPropIgnoreCase } from "../../utils/has-jsx-prop-ignore-case.js";
+import { isLocalTestScaffoldJsx } from "../../utils/is-local-test-scaffold-jsx.js";
 
 const buildMessage = (role: string, missingProps: ReadonlyArray<string>): string =>
   `Screen reader users can't tell the state of this \`${role}\` without its required ARIA props, so add \`${missingProps.join(
@@ -42,6 +44,11 @@ const NATIVE_VALUE_PROPS: ReadonlySet<string> = new Set([
 // state, so it still must declare the prop.
 const NATIVE_HEADING_TAGS: ReadonlySet<string> = new Set(["h1", "h2", "h3", "h4", "h5", "h6"]);
 
+// A native `<select>`'s implicit role is combobox: the browser exposes its
+// expansion state and owns its option popup, so an explicit redundant
+// `role="combobox"` doesn't also need `aria-controls`/`aria-expanded`.
+const NATIVE_COMBOBOX_PROPS: ReadonlySet<string> = new Set(["aria-controls", "aria-expanded"]);
+
 const suppliesNativeAriaProp = (
   node: EsTreeNodeOfType<"JSXOpeningElement">,
   elementType: string,
@@ -50,6 +57,9 @@ const suppliesNativeAriaProp = (
   // A native `<h1>`–`<h6>` carries an intrinsic heading level, so an
   // explicit `role="heading"` doesn't also need `aria-level` spelled out.
   if (property === "aria-level" && NATIVE_HEADING_TAGS.has(elementType)) return true;
+  if (elementType === "select") return NATIVE_COMBOBOX_PROPS.has(property);
+  // A native `<option>` exposes selectedness from its DOM `selected` state.
+  if (property === "aria-selected" && elementType === "option") return true;
   if (elementType !== "input") return false;
   const typeAttribute = hasJsxPropIgnoreCase(node.attributes, "type");
   const inputType = typeAttribute ? getJsxPropStringValue(typeAttribute) : null;
@@ -69,13 +79,22 @@ export const roleHasRequiredAriaProps = defineRule({
   category: "Accessibility",
   create: (context) => ({
     JSXOpeningElement(node: EsTreeNodeOfType<"JSXOpeningElement">) {
+      if (isLocalTestScaffoldJsx(node, context)) return;
       const elementType = getElementType(node, context.settings);
       if (!HTML_TAGS.has(elementType)) return;
       const roleAttribute = hasJsxPropIgnoreCase(node.attributes, "role");
       if (!roleAttribute) return;
-      const roleValue = getJsxPropStringValue(roleAttribute);
-      if (roleValue === null) return;
-      const roles = roleValue.split(/\s+/).filter((token) => token.length > 0);
+      // Static resolution covers `role={cond ? "checkbox" : "radio"}` and
+      // const-bound roles, not just the literal. Every resolved candidate
+      // is validated — a branch missing its required props is a bug
+      // whenever that branch is taken.
+      const roleCandidates = getJsxPropStaticStringValues(roleAttribute, context.scopes);
+      if (roleCandidates === null) return;
+      const roles = new Set(
+        roleCandidates.flatMap((candidate) =>
+          candidate.split(/\s+/).filter((token) => token.length > 0),
+        ),
+      );
       for (const role of roles) {
         const required = ROLE_REQUIRED_PROPS.get(role);
         if (!required) continue;

@@ -80,6 +80,18 @@ export interface Diagnostic {
   endColumn?: number;
   category: string;
   /**
+   * Set when the finding's identity is the flagged element itself (a missing
+   * attribute, a wrong element) rather than the flagged line's text — every
+   * Accessibility-category finding, plus rules that opt in via their
+   * `matchByOccurrence` metadata flag. After strict evidence matching,
+   * `computeDiagnosticDelta` may match these by same-file `(plugin/rule,
+   * message)` occurrence count, so reformatting the flagged element doesn't
+   * reclassify a pre-existing finding as new. Resolved at diagnostic creation,
+   * where rule metadata is available. Absent means diagnosed-source-sensitive
+   * matching (the default).
+   */
+  matchByOccurrence?: boolean;
+  /**
    * Set when the file never ships to users (`"test"` / `"story"`), so
    * renderers can label the site instead of implying production impact.
    * Omitted for production files (the default).
@@ -107,14 +119,16 @@ export interface CleanedDiagnostic {
 /**
  * Per-rule tally of diagnostics the user explicitly silenced, aggregated by
  * how: a config-level off switch (`rules: "off"` / `ignore.rules`), a
- * per-path `ignore.overrides` entry, or an inline `react-doctor-disable*`
- * comment. Telemetry-only — the rule-quality signal for which rules users
- * reject — never rendered, scored, or part of the JSON report.
+ * per-path `ignore.overrides` entry, an inline `react-doctor-disable*`
+ * comment, or a foreign `eslint-disable*` / `oxlint-disable*` comment that
+ * core honors for React Compiler diagnostics (`"foreign-inline"`).
+ * Telemetry-only — the rule-quality signal for which rules users reject —
+ * never rendered, scored, or part of the JSON report.
  */
 export interface SuppressedRuleCount {
   /** Canonical `<plugin>/<rule>` key (see `getDiagnosticRuleIdentity`). */
   readonly rule: string;
-  readonly source: "config" | "override" | "inline";
+  readonly source: "config" | "override" | "inline" | "foreign-inline";
   readonly count: number;
 }
 

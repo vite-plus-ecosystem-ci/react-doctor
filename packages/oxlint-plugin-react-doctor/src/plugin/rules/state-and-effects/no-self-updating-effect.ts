@@ -3,7 +3,7 @@ import { defineRule } from "../../utils/define-rule.js";
 import { getCallbackStatements } from "../../utils/get-callback-statements.js";
 import { getEffectCallback } from "../../utils/get-effect-callback.js";
 import { isComponentAssignment } from "../../utils/is-component-assignment.js";
-import { isHookCall } from "../../utils/is-hook-call.js";
+import { isReactHookCall } from "../../utils/is-react-hook-call.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { isAstNode } from "../../utils/is-ast-node.js";
 import { isReactHookName } from "../../utils/is-react-hook-name.js";
@@ -12,6 +12,7 @@ import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import type { RuleContext } from "../../utils/rule-context.js";
+import { unwrapDiscardedExpression } from "../../utils/unwrap-discarded-expression.js";
 import { collectUseStateBindings } from "./utils/collect-use-state-bindings.js";
 
 // Every literal builds a value-equal result except a regex literal,
@@ -104,9 +105,7 @@ const getUnconditionalSetterCall = (
   // arrow body (`() => setCount(...)`) and the `ExpressionStatement` for a
   // block body (`() => { setCount(...); }`). Both are unconditional
   // synchronous writes, so unwrap the statement form and treat them alike.
-  const expression = stripParenExpression(
-    isNodeOfType(statement, "ExpressionStatement") ? statement.expression : statement,
-  );
+  const expression = unwrapDiscardedExpression(statement);
   if (!isNodeOfType(expression, "CallExpression")) return null;
   if (!isNodeOfType(expression.callee, "Identifier")) return null;
   if (!setterNames.has(expression.callee.name)) return null;
@@ -295,6 +294,141 @@ const isLengthReducingUpdater = (node: EsTreeNode): boolean => {
     return false;
   const sliceStart = numericLiteralValue(returned.arguments?.[0]);
   return sliceStart !== null && sliceStart >= 1;
+};
+
+const isFunctionExpressionNode = (
+  node: EsTreeNode,
+): node is EsTreeNodeOfType<"ArrowFunctionExpression"> | EsTreeNodeOfType<"FunctionExpression"> =>
+  isNodeOfType(node, "ArrowFunctionExpression") || isNodeOfType(node, "FunctionExpression");
+
+const collectAllReturnExpressions = (fn: EsTreeNode): EsTreeNode[] => {
+  if (!isFunctionExpressionNode(fn)) return [];
+  if (!isNodeOfType(fn.body, "BlockStatement")) {
+    return fn.body ? [stripParenExpression(fn.body)] : [];
+  }
+  const returns: EsTreeNode[] = [];
+  const visit = (node: EsTreeNode): void => {
+    if (node !== fn && isFunctionExpressionNode(node)) return;
+    if (isNodeOfType(node, "FunctionDeclaration")) return;
+    if (isNodeOfType(node, "ReturnStatement")) {
+      if (node.argument) returns.push(stripParenExpression(node.argument));
+      return;
+    }
+    const record = node as unknown as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      if (key === "parent" || key === "type") continue;
+      const child = record[key];
+      if (Array.isArray(child)) {
+        for (const item of child) if (isAstNode(item)) visit(item);
+      } else if (isAstNode(child)) {
+        visit(child);
+      }
+    }
+  };
+  visit(fn.body);
+  return returns;
+};
+
+const getUpdaterParameterName = (fn: EsTreeNode): string | null => {
+  if (!isFunctionExpressionNode(fn)) return null;
+  const firstParameter = fn.params?.[0];
+  return firstParameter && isNodeOfType(firstParameter, "Identifier") ? firstParameter.name : null;
+};
+
+const expressionCanBeBareParameter = (node: EsTreeNode, parameterName: string): boolean => {
+  const current = stripParenExpression(node);
+  if (isNodeOfType(current, "Identifier")) return current.name === parameterName;
+  if (isNodeOfType(current, "ConditionalExpression")) {
+    return (
+      expressionCanBeBareParameter(current.consequent as EsTreeNode, parameterName) ||
+      expressionCanBeBareParameter(current.alternate as EsTreeNode, parameterName)
+    );
+  }
+  return false;
+};
+
+// `(prev) => prev.map(...)` — a length-preserving rewrite of the previous
+// value. It converges once every mapped item already matches its target;
+// proving that needs value tracking we do not attempt, so per the doc this
+// is one of the rule's two ACCEPTED unprovable cases: suppress it.
+const isMapOverParameterUpdater = (fn: EsTreeNode, parameterName: string): boolean =>
+  collectAllReturnExpressions(fn).some((returned) => {
+    if (!isNodeOfType(returned, "CallExpression")) return false;
+    const callee = returned.callee;
+    return (
+      isNodeOfType(callee, "MemberExpression") &&
+      !callee.computed &&
+      isNodeOfType(callee.object, "Identifier") &&
+      callee.object.name === parameterName &&
+      isNodeOfType(callee.property, "Identifier") &&
+      callee.property.name === "map"
+    );
+  });
+
+// An updater with a code path that returns its own parameter unchanged
+// (`if (clamped === current.activeIndex) return current;`,
+// `return changed ? nextUrls : prevUrls;`) settles by Object.is once the
+// no-change path is taken — the equality-guarded converging shape the doc
+// says to suppress.
+const updaterCanReturnOwnParameter = (fn: EsTreeNode, parameterName: string): boolean =>
+  collectAllReturnExpressions(fn).some((returned) =>
+    expressionCanBeBareParameter(returned, parameterName),
+  );
+
+const isIncrementByLiteralUpdater = (fn: EsTreeNode, parameterName: string): boolean => {
+  const returned = functionReturnExpression(fn);
+  if (!returned || !isNodeOfType(returned, "BinaryExpression")) return false;
+  if (returned.operator !== "+" && returned.operator !== "-") return false;
+  const left = stripParenExpression(returned.left as EsTreeNode);
+  const right = stripParenExpression(returned.right as EsTreeNode);
+  return (
+    (isNodeOfType(left, "Identifier") &&
+      left.name === parameterName &&
+      numericLiteralValue(right) !== null) ||
+    (isNodeOfType(right, "Identifier") &&
+      right.name === parameterName &&
+      numericLiteralValue(left) !== null)
+  );
+};
+
+const RELATIONAL_OPERATORS = new Set(["<", "<=", ">", ">="]);
+
+const guardBoundsStateRelationally = (test: EsTreeNode, stateName: string): boolean => {
+  const node = unwrapChain(test);
+  if (isNodeOfType(node, "LogicalExpression")) {
+    return (
+      guardBoundsStateRelationally(node.left as EsTreeNode, stateName) ||
+      guardBoundsStateRelationally(node.right as EsTreeNode, stateName)
+    );
+  }
+  if (!isNodeOfType(node, "BinaryExpression")) return false;
+  if (!RELATIONAL_OPERATORS.has(node.operator)) return false;
+  return (
+    expressionReadsStateValue(node.left as EsTreeNode, stateName) ||
+    expressionReadsStateValue(node.right as EsTreeNode, stateName)
+  );
+};
+
+// The rule's two ACCEPTED unprovable-but-converging updater shapes (per the
+// doc): a `.map()` functional updater / an updater that can hand back its own
+// parameter (settles by Object.is), and a grow-by-one write bounded by a
+// pre-write early-return guard that compares the same state against a limit.
+const isAcceptedConvergingUpdater = (
+  setterCall: EsTreeNodeOfType<"CallExpression">,
+  stateName: string,
+  earlyReturnGuardTests: readonly EsTreeNode[],
+): boolean => {
+  const firstArgument = setterCall.arguments?.[0];
+  if (!firstArgument) return false;
+  const updater = stripParenExpression(firstArgument);
+  const parameterName = getUpdaterParameterName(updater);
+  if (!parameterName) return false;
+  if (isMapOverParameterUpdater(updater, parameterName)) return true;
+  if (updaterCanReturnOwnParameter(updater, parameterName)) return true;
+  return (
+    isIncrementByLiteralUpdater(updater, parameterName) &&
+    earlyReturnGuardTests.some((test) => guardBoundsStateRelationally(test, stateName))
+  );
 };
 
 // A guarded write is a PROVABLE non-loop only when it drives the state toward
@@ -652,7 +786,7 @@ export const noSelfUpdatingEffect = defineRule({
     const checkFunctionScope = (functionBody: EsTreeNode | null | undefined): void => {
       if (!functionBody || !isNodeOfType(functionBody, "BlockStatement")) return;
 
-      const useStateBindings = collectUseStateBindings(functionBody);
+      const useStateBindings = collectUseStateBindings(functionBody, context.scopes);
       if (useStateBindings.length === 0) return;
 
       const setterNameToStateName = new Map<string, string>();
@@ -663,9 +797,9 @@ export const noSelfUpdatingEffect = defineRule({
 
       for (const statement of functionBody.body ?? []) {
         if (!isNodeOfType(statement, "ExpressionStatement")) continue;
-        const effectCall = statement.expression;
+        const effectCall = unwrapDiscardedExpression(statement);
         if (!isNodeOfType(effectCall, "CallExpression")) continue;
-        if (!isHookCall(effectCall, EFFECT_HOOK_NAMES)) continue;
+        if (!isReactHookCall(effectCall, EFFECT_HOOK_NAMES, context.scopes)) continue;
         if ((effectCall.arguments?.length ?? 0) < 2) continue;
 
         const dependencyStateNames = collectDependencyStateNames(effectCall.arguments[1]);
@@ -728,6 +862,9 @@ export const noSelfUpdatingEffect = defineRule({
             ) &&
             everyWriteToStateDrivesTowardEmpty(callback, setterCall.callee.name)
           ) {
+            continue;
+          }
+          if (isAcceptedConvergingUpdater(setterCall, stateName, earlyReturnGuardTests)) {
             continue;
           }
 

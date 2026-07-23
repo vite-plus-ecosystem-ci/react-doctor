@@ -9,12 +9,17 @@ import {
   computeDiagnosticDelta,
   DEFAULT_SHOW_WARNINGS,
   filterDiagnosticsForSurface,
+  filterSourceFiles,
   highlighter,
   OXLINT_NODE_REQUIREMENT,
+  PerFileLintCacheEnabled,
   resolveScanTarget,
   restoreLegacyThrow,
   runInspect as runInspectEffect,
+  SidecarLintCacheEnabled,
 } from "@react-doctor/core";
+import type * as Layer from "effect/Layer";
+import type { Progress, Reporter } from "@react-doctor/core";
 import { applyObservability } from "./cli/utils/apply-observability.js";
 import { buildRuntimeLayers } from "./cli/utils/build-runtime-layers.js";
 import {
@@ -41,9 +46,11 @@ import type {
   ScoreResult,
 } from "@react-doctor/core";
 import { toForwardSlashes } from "./cli/utils/path-format.js";
+import { diagnosticIntersectsLineRanges } from "./cli/utils/diagnostic-intersects-line-ranges.js";
 import { makeNoopConsole } from "./cli/utils/noop-console.js";
 import { materializeBaselineFiles } from "./cli/utils/materialize-baseline-files.js";
 import { createSourceLineReader } from "./cli/utils/read-source-line.js";
+import { createDiagnosticEvidenceReader } from "./cli/utils/read-diagnostic-evidence.js";
 import { buildNoScoreMessage } from "./cli/utils/build-no-score-message.js";
 import { printAgentGuidance } from "./cli/utils/render-agent-guidance.js";
 import {
@@ -55,6 +62,7 @@ import { buildRulePriorityMap } from "./cli/utils/diagnostic-grouping.js";
 import { filterDiagnosticsByCategories } from "./cli/utils/filter-diagnostics-by-categories.js";
 import { printDiagnostics } from "./cli/utils/render-diagnostics.js";
 import { shouldRenderHyperlinks } from "./cli/utils/should-render-hyperlinks.js";
+import { shouldShowShareLink } from "./cli/utils/should-show-share-link.js";
 import { isNonInteractiveEnvironment } from "./cli/utils/is-non-interactive-environment.js";
 import {
   canAnimateOnboarding,
@@ -112,8 +120,8 @@ const recordOnboardingCompletion = (options: ResolvedInspectOptions): void => {
 const formatCategorySelection = (categoryFilters: ReadonlySet<string>): string =>
   [...categoryFilters].join(", ");
 
-// Builds the `--scope lines` predicate: a diagnostic survives when its line
-// falls in a changed range of its file. `changedLineRanges` is keyed by paths
+// Builds the `--scope lines` predicate: a diagnostic survives when its source
+// span intersects a changed range of its file. `changedLineRanges` is keyed by paths
 // relative to `directory`; diagnostic paths are normalized the same way so
 // absolute and relative forms both match.
 const buildChangedLineMatcher = (
@@ -132,12 +140,27 @@ const buildChangedLineMatcher = (
     );
     const ranges = rangesByFile.get(relativePath);
     if (ranges === undefined) return false;
-    return ranges.some(([start, end]) => diagnostic.line >= start && diagnostic.line <= end);
+    return diagnosticIntersectsLineRanges(diagnostic, ranges);
   };
 };
 
+/**
+ * CLI-only: layer overrides an interactive UI supplies so the scan streams
+ * live diagnostics (and optionally progress) into it instead of the console.
+ * When present, all console rendering is suppressed — the UI owns the screen
+ * and reads the returned result. The scan engine never learns the UI's
+ * concrete store type; it only sees these generic service layers.
+ */
+export interface InspectUiLayers {
+  readonly reporter: Layer.Layer<Reporter>;
+  readonly progress?: Layer.Layer<Progress>;
+}
+
 export interface ReactDoctorInspectOptions extends InspectOptions {
   categoryFilters?: string[];
+  includedTags?: ReadonlySet<string>;
+  includeTagDefaults?: boolean;
+  scoreDisabledMessage?: string;
   /**
    * Internal: an absolute epoch-ms deadline shared across a workspace scan's
    * projects. The CLI sets it so every project honors ONE `--max-duration`
@@ -146,11 +169,14 @@ export interface ReactDoctorInspectOptions extends InspectOptions {
    * the deadline is derived from `maxDurationMs` at call start.
    */
   deadlineEpochMs?: number;
+  /** See {@link InspectUiLayers}. */
+  uiLayers?: InspectUiLayers;
 }
 
 export interface ResolvedInspectOptions {
   lint: boolean;
   deadCode: boolean;
+  supplyChain: boolean;
   verbose: boolean;
   /** See `InspectOptions.outputDirectory`. `null` keeps the temp-dir default. */
   outputDirectory: string | null;
@@ -168,6 +194,9 @@ export interface ResolvedInspectOptions {
   categoryFilters: ReadonlySet<string>;
   adoptExistingLintConfig: boolean;
   ignoredTags: ReadonlySet<string>;
+  includedTags: ReadonlySet<string>;
+  includeTagDefaults: boolean;
+  scoreDisabledMessage: string | undefined;
   outputSurface: DiagnosticSurface;
   suppressRendering: boolean;
   /** See `InspectOptions.concurrentScan`. */
@@ -177,7 +206,11 @@ export interface ResolvedInspectOptions {
   /** Scan time budget in milliseconds, or `null` for no budget. */
   maxDurationMs: number | null;
   /** Baseline ref to subtract (new-only mode), or `null` for a plain scan. */
-  baseline: { ref: string } | null;
+  baseline: {
+    ref: string;
+    baseFiles?: ReadonlyArray<string>;
+    headFiles?: ReadonlyArray<string>;
+  } | null;
   /**
    * `--scope lines`: changed line ranges to restrict reported diagnostics to,
    * or `null` for any other scope. An empty array still filters (a `lines`
@@ -186,48 +219,63 @@ export interface ResolvedInspectOptions {
   changedLineRanges: ReadonlyArray<ChangedFileLineRanges> | null;
   /** See `InspectOptions.supplyChainManifestChanged`. */
   supplyChainManifestChanged: boolean;
+  /** Interactive UI layer overrides, or `null` for the static console path. */
+  uiLayers: InspectUiLayers | null;
 }
 
-const buildIgnoredTags = (userConfig: ReactDoctorConfig | null): ReadonlySet<string> => {
+const buildIgnoredTags = (
+  userConfig: ReactDoctorConfig | null,
+  includedTags: ReadonlySet<string>,
+): ReadonlySet<string> => {
   const tags = new Set<string>();
   if (userConfig?.ignore?.tags) {
     for (const tag of userConfig.ignore.tags) tags.add(tag);
   }
+  for (const tag of includedTags) tags.delete(tag);
   return tags;
 };
 
 const mergeInspectOptions = (
   inputOptions: ReactDoctorInspectOptions,
   userConfig: ReactDoctorConfig | null,
-): ResolvedInspectOptions => ({
-  lint: inputOptions.lint ?? userConfig?.lint ?? true,
-  deadCode: inputOptions.deadCode ?? userConfig?.deadCode ?? true,
-  verbose: inputOptions.verbose ?? userConfig?.verbose ?? false,
-  outputDirectory: inputOptions.outputDirectory || null,
-  scoreOnly: inputOptions.scoreOnly ?? false,
-  noScore: inputOptions.noScore ?? userConfig?.noScore ?? false,
-  isCi: inputOptions.isCi ?? false,
-  isCiOrCodingAgentEnvironment: isCiOrCodingAgentEnvironment(),
-  isNonInteractiveEnvironment: isNonInteractiveEnvironment(),
-  silent: inputOptions.silent ?? false,
-  includePaths: inputOptions.includePaths ?? [],
-  customRulesOnly: userConfig?.customRulesOnly ?? false,
-  share: userConfig?.share ?? true,
-  respectInlineDisables:
-    inputOptions.respectInlineDisables ?? userConfig?.respectInlineDisables ?? true,
-  warnings: inputOptions.warnings ?? userConfig?.warnings ?? DEFAULT_SHOW_WARNINGS,
-  categoryFilters: new Set(resolveCliCategories(inputOptions.categoryFilters) ?? []),
-  adoptExistingLintConfig: userConfig?.adoptExistingLintConfig ?? true,
-  ignoredTags: buildIgnoredTags(userConfig),
-  outputSurface: inputOptions.outputSurface ?? "cli",
-  suppressRendering: inputOptions.suppressRendering ?? false,
-  concurrentScan: inputOptions.concurrentScan ?? false,
-  concurrency: inputOptions.concurrency,
-  maxDurationMs: inputOptions.maxDurationMs ?? null,
-  baseline: inputOptions.baseline ?? null,
-  changedLineRanges: inputOptions.changedLineRanges ?? null,
-  supplyChainManifestChanged: inputOptions.supplyChainManifestChanged ?? false,
-});
+): ResolvedInspectOptions => {
+  const includedTags = inputOptions.includedTags ?? new Set<string>();
+  return {
+    lint: inputOptions.lint ?? userConfig?.lint ?? true,
+    deadCode: inputOptions.deadCode ?? userConfig?.deadCode ?? true,
+    supplyChain: inputOptions.supplyChain ?? userConfig?.supplyChain?.enabled ?? true,
+    verbose: inputOptions.verbose ?? userConfig?.verbose ?? false,
+    outputDirectory: inputOptions.outputDirectory || null,
+    scoreOnly: inputOptions.scoreOnly ?? false,
+    noScore: inputOptions.noScore ?? userConfig?.noScore ?? false,
+    isCi: inputOptions.isCi ?? false,
+    isCiOrCodingAgentEnvironment: isCiOrCodingAgentEnvironment(),
+    isNonInteractiveEnvironment: isNonInteractiveEnvironment(),
+    silent: inputOptions.silent ?? false,
+    includePaths: inputOptions.includePaths ?? [],
+    customRulesOnly: includedTags.size > 0 ? false : (userConfig?.customRulesOnly ?? false),
+    share: userConfig?.share ?? true,
+    respectInlineDisables:
+      inputOptions.respectInlineDisables ?? userConfig?.respectInlineDisables ?? true,
+    warnings: inputOptions.warnings ?? userConfig?.warnings ?? DEFAULT_SHOW_WARNINGS,
+    categoryFilters: new Set(resolveCliCategories(inputOptions.categoryFilters) ?? []),
+    adoptExistingLintConfig:
+      includedTags.size > 0 ? false : (userConfig?.adoptExistingLintConfig ?? true),
+    ignoredTags: buildIgnoredTags(userConfig, includedTags),
+    includedTags,
+    includeTagDefaults: inputOptions.includeTagDefaults ?? false,
+    scoreDisabledMessage: inputOptions.scoreDisabledMessage,
+    outputSurface: inputOptions.outputSurface ?? "cli",
+    suppressRendering: (inputOptions.suppressRendering ?? false) || inputOptions.uiLayers != null,
+    uiLayers: inputOptions.uiLayers ?? null,
+    concurrentScan: inputOptions.concurrentScan ?? false,
+    concurrency: inputOptions.concurrency,
+    maxDurationMs: inputOptions.maxDurationMs ?? null,
+    baseline: inputOptions.baseline ?? null,
+    changedLineRanges: inputOptions.changedLineRanges ?? null,
+    supplyChainManifestChanged: inputOptions.supplyChainManifestChanged ?? false,
+  };
+};
 
 // The scan-config slice of the wide event, shared by the success and failure
 // emit paths (the failure path has no `result`, so it can only supply config).
@@ -265,6 +313,7 @@ const buildRunEventConfig = (
     maxDurationMs: options.maxDurationMs,
     lint: options.lint,
     deadCode: options.deadCode,
+    supplyChain: options.supplyChain,
     scoreOnly: options.scoreOnly,
     noScore: options.noScore,
     respectInlineDisables: options.respectInlineDisables,
@@ -414,6 +463,9 @@ interface RunBaselineComparisonInput {
   headDiagnostics: ReadonlyArray<Diagnostic>;
   resolvedNodeBinaryPath: string | null;
   baselineRef: string;
+  baseFiles?: ReadonlyArray<string>;
+  headFiles?: ReadonlyArray<string>;
+  headAnalyzedFiles: ReadonlyArray<string>;
   /** Shared invocation deadline; bounds the base-ref lint like the head scan. */
   deadlineEpochMs: number | null;
 }
@@ -435,12 +487,32 @@ const runBaselineComparison = async (
     directory: params.directory,
     ref: params.baselineRef,
     files: params.options.includePaths,
+    baseFiles: params.baseFiles,
+    headFiles: params.headFiles,
     tempDirectory,
   }).catch((error: unknown) => {
     rmSync(tempDirectory, { recursive: true, force: true });
     throw error;
   });
+  if (snapshot === null) {
+    rmSync(tempDirectory, { recursive: true, force: true });
+    return null;
+  }
   try {
+    if (!snapshot.isComplete) return null;
+    const analyzedHeadFiles = new Set(params.headAnalyzedFiles.map(toForwardSlashes));
+    const baseFiles = new Set(snapshot.baseFiles.map(toForwardSlashes));
+    const trackedHeadFiles = new Set(snapshot.headFiles.map(toForwardSlashes));
+    const expectedHeadFiles = new Set(trackedHeadFiles);
+    for (const filePath of params.options.includePaths) {
+      const normalizedFilePath = toForwardSlashes(filePath);
+      if (!baseFiles.has(normalizedFilePath)) expectedHeadFiles.add(normalizedFilePath);
+    }
+    if (
+      filterSourceFiles([...expectedHeadFiles]).some((filePath) => !analyzedHeadFiles.has(filePath))
+    ) {
+      return null;
+    }
     const baseLayers = buildRuntimeLayers({
       directory: snapshot.tempDirectory,
       hasConfigOverride: true,
@@ -449,6 +521,7 @@ const runBaselineComparison = async (
       projectInfoOverride: params.headProjectInfo,
       shouldSkipLint: !params.options.lint || !params.resolvedNodeBinaryPath,
       shouldRunDeadCode: false,
+      shouldRunSupplyChain: params.options.supplyChain,
       shouldComputeScore: false,
       shouldShowProgressSpinners: false,
       oxlintConcurrency: params.options.concurrency,
@@ -456,12 +529,14 @@ const runBaselineComparison = async (
     const baseProgram = runInspectEffect(
       {
         directory: snapshot.tempDirectory,
-        includePaths: params.options.includePaths,
+        includePaths: snapshot.materializedFiles,
         customRulesOnly: params.options.customRulesOnly,
         respectInlineDisables: params.options.respectInlineDisables,
         warnings: params.options.warnings,
         adoptExistingLintConfig: params.options.adoptExistingLintConfig,
         ignoredTags: params.options.ignoredTags,
+        includedTags: params.options.includedTags,
+        includeTagDefaults: params.options.includeTagDefaults,
         nodeBinaryPath: params.resolvedNodeBinaryPath ?? undefined,
         runDeadCode: false,
         isCi: params.options.isCi,
@@ -482,6 +557,12 @@ const runBaselineComparison = async (
       restoreLegacyThrow(
         baseProgram.pipe(
           Effect.provide(baseLayers),
+          // The base snapshot lints in a per-run-unique temp dir, so its
+          // on-disk cache identity can never hit — writing would only mint an
+          // orphan per-run subdir inside the CI-persisted cache directory
+          // (unbounded growth across the action's restore→save cycles).
+          Effect.provideService(PerFileLintCacheEnabled, false),
+          Effect.provideService(SidecarLintCacheEnabled, false),
           Effect.provideService(Console.Console, silentConsole),
         ),
       ),
@@ -495,18 +576,26 @@ const runBaselineComparison = async (
     if (baseOutput.didLintFail || countIncompleteLintFiles(baseOutput.lintPartialFailures) > 0) {
       return null;
     }
+    const hasUnscannedUntrackedSourceFiles = filterSourceFiles(
+      snapshot.untrackedFiles.map(toForwardSlashes),
+    ).some((filePath) => !analyzedHeadFiles.has(filePath));
     const delta = computeDiagnosticDelta({
       headDiagnostics: params.headDiagnostics,
       baseDiagnostics: baseOutput.diagnostics,
       readHeadLine: createSourceLineReader(params.directory),
       readBaseLine: createSourceLineReader(snapshot.tempDirectory),
+      readHeadEvidence: createDiagnosticEvidenceReader(params.directory, {
+        resolveForwardedHandlers: true,
+      }),
+      readBaseEvidence: createDiagnosticEvidenceReader(snapshot.tempDirectory),
     });
     return {
       displayDiagnostics: delta.newDiagnostics,
       baselineDelta: {
         baseRef: params.baselineRef,
-        fixedCount: delta.fixedCount,
+        fixedCount: hasUnscannedUntrackedSourceFiles ? 0 : delta.fixedCount,
         baseTotalCount: baseOutput.diagnostics.length,
+        crossFileMatchCount: delta.crossFileMatchCount,
       },
     };
   } finally {
@@ -570,6 +659,7 @@ const runInspectWithRuntime = async (
       rootSentrySpan,
       scanMode: cachedPayload.baselineDelta ? "baseline" : isDiffMode ? "diff" : "full",
       baselineDegraded,
+      wholeRepoCacheHit: true,
     });
     recordOnboardingCompletion(options);
     return result;
@@ -596,9 +686,12 @@ const runInspectWithRuntime = async (
     configSourceDirectory,
     shouldSkipLint: !options.lint || lintBindingMissing,
     shouldRunDeadCode: options.deadCode,
+    shouldRunSupplyChain: options.supplyChain,
     shouldComputeScore: !options.noScore,
     shouldShowProgressSpinners,
     oxlintConcurrency: options.concurrency,
+    reporterLayer: options.uiLayers?.reporter,
+    progressLayer: options.uiLayers?.progress,
   });
 
   const program = runInspectEffect(
@@ -610,6 +703,8 @@ const runInspectWithRuntime = async (
       warnings: options.warnings,
       adoptExistingLintConfig: options.adoptExistingLintConfig,
       ignoredTags: options.ignoredTags,
+      includedTags: options.includedTags,
+      includeTagDefaults: options.includeTagDefaults,
       nodeBinaryPath: resolvedNodeBinaryPath ?? undefined,
       runDeadCode: options.deadCode,
       isCi: options.isCi,
@@ -675,6 +770,7 @@ const runInspectWithRuntime = async (
   // `message.includes(...)`).
   if (
     !options.scoreOnly &&
+    !options.uiLayers &&
     !lintBindingMissing &&
     output.didLintFail &&
     lintFailureReason !== null
@@ -720,6 +816,9 @@ const runInspectWithRuntime = async (
       headDiagnostics: output.diagnostics,
       resolvedNodeBinaryPath,
       baselineRef: options.baseline.ref,
+      baseFiles: options.baseline.baseFiles,
+      headFiles: options.baseline.headFiles,
+      headAnalyzedFiles: output.analyzedFiles,
       deadlineEpochMs,
     });
     if (comparison) {
@@ -727,7 +826,7 @@ const runInspectWithRuntime = async (
       baselineDelta = comparison.baselineDelta;
     }
   } else if (options.changedLineRanges !== null && isDiffMode) {
-    // `--scope lines`: keep only diagnostics on the lines the change touched.
+    // `--scope lines`: keep diagnostics whose source spans touch the change.
     // Runs at the same post-lint seam as baseline (the score is already
     // computed on the full head set), so the gate, summary, and inline
     // comments all narrow together.
@@ -758,6 +857,7 @@ const runInspectWithRuntime = async (
     directory: output.resolvedDirectory,
     scannedFileCount: output.scannedFileCount,
     scannedFilePaths: output.scannedFilePaths,
+    analyzedFiles: output.analyzedFiles,
     scanElapsedMilliseconds: output.scanElapsedMilliseconds,
     scanConcurrency: output.scanConcurrency,
     baselineDelta,
@@ -790,8 +890,14 @@ const runInspectWithRuntime = async (
     rootSentrySpan,
     scanMode: baselineDelta ? "baseline" : isDiffMode ? "diff" : "full",
     baselineDegraded,
+    wholeRepoCacheHit: false,
     lintCacheHitFileCount: output.lintCacheHitFileCount,
     lintCacheTotalFileCount: output.lintCacheTotalFileCount,
+    lintSidecarReplayedFileCount: output.lintSidecarReplayedFileCount,
+    lintSidecarTotalFileCount: output.lintSidecarTotalFileCount,
+    deadCodeCacheHit: output.deadCodeCacheHit,
+    deadCodeSummaryCacheHits: output.deadCodeSummaryCacheHits,
+    deadCodeSummaryCacheMisses: output.deadCodeSummaryCacheMisses,
   });
   recordOnboardingCompletion(options);
   return result;
@@ -809,12 +915,20 @@ interface FinalizeInput {
   lintPartialFailures: ReadonlyArray<string>;
   didDeadCodeFail: boolean;
   deadCodeFailureReason: string | null;
+  supplyChainOverlapTimedOut: boolean;
+  securityScanFailed: boolean;
   directory: string;
   scannedFileCount: number;
   scannedFilePaths: ReadonlyArray<string>;
+  analyzedFiles: ReadonlyArray<string>;
   scanElapsedMilliseconds: number;
   lintCacheHitFileCount: number | null;
   lintCacheTotalFileCount: number | null;
+  lintSidecarReplayedFileCount: number | null;
+  lintSidecarTotalFileCount: number | null;
+  deadCodeCacheHit: boolean | null;
+  deadCodeSummaryCacheHits: number | null;
+  deadCodeSummaryCacheMisses: number | null;
   baselineDelta: InspectResult["baselineDelta"];
 }
 
@@ -835,6 +949,14 @@ interface RenderAndRecordScanInput {
   readonly scanMode: "full" | "diff" | "baseline";
   readonly baselineDegraded: boolean;
   /**
+   * `true` only on the whole-repo scan-result replay path (the exact-key
+   * `cachedPayload` branch, where no lint / dead-code / score work ran).
+   * Required so both call sites state it explicitly — the wide event's
+   * `cache.temperature = "turbo"` derives from this flag, never from the
+   * execution dims below happening to be null.
+   */
+  readonly wholeRepoCacheHit: boolean;
+  /**
    * Per-file lint cache outcome for THIS scan's lint pass. Threaded outside
    * `CachedScanPayload` on purpose — it's telemetry about the lint that ran in
    * this process, not part of the cacheable result, so a whole-repo cache
@@ -842,6 +964,26 @@ interface RenderAndRecordScanInput {
    */
   readonly lintCacheHitFileCount?: number | null;
   readonly lintCacheTotalFileCount?: number | null;
+  /**
+   * Sidecar lint cache outcome for THIS scan's lint pass. Threaded outside
+   * `CachedScanPayload` for the same reason as the lint cache stats above.
+   */
+  readonly lintSidecarReplayedFileCount?: number | null;
+  readonly lintSidecarTotalFileCount?: number | null;
+  /**
+   * Dead-code result cache outcome for THIS scan's dead-code pass. Threaded
+   * outside `CachedScanPayload` for the same reason as the lint cache stats
+   * above: a whole-repo cache replay (where no analysis ran) correctly
+   * leaves it absent.
+   */
+  readonly deadCodeCacheHit?: boolean | null;
+  /**
+   * deslop's incremental summary-cache outcome for THIS scan's dead-code
+   * analysis (files served from cached parse summaries vs freshly parsed).
+   * Same outside-the-payload contract as the fields above.
+   */
+  readonly deadCodeSummaryCacheHits?: number | null;
+  readonly deadCodeSummaryCacheMisses?: number | null;
 }
 
 const runMaybeSilent = <A, E, R>(
@@ -881,12 +1023,20 @@ const renderAndRecordScan = async (input: RenderAndRecordScanInput): Promise<Ins
     lintPartialFailures: input.payload.lintPartialFailures,
     didDeadCodeFail: input.payload.didDeadCodeFail,
     deadCodeFailureReason: input.payload.deadCodeFailureReason,
+    supplyChainOverlapTimedOut: input.payload.supplyChainOverlapTimedOut,
+    securityScanFailed: input.payload.securityScanFailed ?? false,
     directory: input.payload.directory,
     scannedFileCount: input.payload.scannedFileCount,
     scannedFilePaths: input.payload.scannedFilePaths,
+    analyzedFiles: input.payload.analyzedFiles ?? [],
     scanElapsedMilliseconds: input.payload.scanElapsedMilliseconds,
     lintCacheHitFileCount: input.lintCacheHitFileCount ?? null,
     lintCacheTotalFileCount: input.lintCacheTotalFileCount ?? null,
+    lintSidecarReplayedFileCount: input.lintSidecarReplayedFileCount ?? null,
+    lintSidecarTotalFileCount: input.lintSidecarTotalFileCount ?? null,
+    deadCodeCacheHit: input.deadCodeCacheHit ?? null,
+    deadCodeSummaryCacheHits: input.deadCodeSummaryCacheHits ?? null,
+    deadCodeSummaryCacheMisses: input.deadCodeSummaryCacheMisses ?? null,
     baselineDelta: input.payload.baselineDelta,
   };
   const result = await Effect.runPromise(
@@ -925,6 +1075,7 @@ const renderAndRecordScan = async (input: RenderAndRecordScanInput): Promise<Ins
     result,
     mode: input.scanMode,
     gateExempt: input.baselineDegraded,
+    wholeRepoCacheHit: input.wholeRepoCacheHit,
     didLintFail: input.payload.didLintFail,
     lintFailureReasonKind: input.payload.lintFailureReasonKind,
     lintPartialFailureCount: input.payload.lintPartialFailures.length,
@@ -953,12 +1104,20 @@ const finalizeAndRender = (input: FinalizeInput): Effect.Effect<InspectResult> =
       lintPartialFailures,
       didDeadCodeFail,
       deadCodeFailureReason,
+      supplyChainOverlapTimedOut,
+      securityScanFailed,
       directory,
       scannedFileCount,
       scannedFilePaths,
+      analyzedFiles,
       scanElapsedMilliseconds,
       lintCacheHitFileCount,
       lintCacheTotalFileCount,
+      lintSidecarReplayedFileCount,
+      lintSidecarTotalFileCount,
+      deadCodeCacheHit,
+      deadCodeSummaryCacheHits,
+      deadCodeSummaryCacheMisses,
       baselineDelta,
     } = input;
 
@@ -968,10 +1127,12 @@ const finalizeAndRender = (input: FinalizeInput): Effect.Effect<InspectResult> =
       lintPartialFailures,
       didDeadCodeFail,
       deadCodeFailureReason,
+      supplyChainOverlapTimedOut,
+      securityScanFailed,
     });
     const hasSkippedChecks = skippedChecks.length > 0;
 
-    const noScoreMessage = buildNoScoreMessage(options.noScore);
+    const noScoreMessage = buildNoScoreMessage(options.noScore, options.scoreDisabledMessage);
 
     const buildResult = (): InspectResult => ({
       diagnostics: [...diagnostics],
@@ -982,9 +1143,17 @@ const finalizeAndRender = (input: FinalizeInput): Effect.Effect<InspectResult> =
       elapsedMilliseconds,
       scannedFileCount,
       scannedFilePaths,
+      analyzedFiles,
       scanElapsedMilliseconds,
       ...(lintCacheTotalFileCount !== null
         ? { lintCacheHitFileCount, lintCacheTotalFileCount }
+        : {}),
+      ...(lintSidecarTotalFileCount !== null
+        ? { lintSidecarReplayedFileCount, lintSidecarTotalFileCount }
+        : {}),
+      ...(deadCodeCacheHit !== null ? { deadCodeCacheHit } : {}),
+      ...(deadCodeSummaryCacheHits !== null && deadCodeSummaryCacheMisses !== null
+        ? { deadCodeSummaryCacheHits, deadCodeSummaryCacheMisses }
         : {}),
       ...(baselineDelta ? { baselineDelta } : {}),
     });
@@ -1098,13 +1267,19 @@ const finalizeAndRender = (input: FinalizeInput): Effect.Effect<InspectResult> =
 
     // Re-score with the displayed top errors removed so the score bar can
     // show the payoff as a ghost gain segment.
+    const scoreDiagnostics = filterDiagnosticsForSurface([...diagnostics], "score", userConfig);
+    const displayedScoreDiagnostics = filterDiagnosticsForSurface(
+      [...printedDiagnostics],
+      "score",
+      userConfig,
+    );
     const potentialScore = score
       ? yield* Effect.promise(() =>
-          computeProjectedScore([...printedDiagnostics], [...surfaceDiagnostics], score),
+          computeProjectedScore(displayedScoreDiagnostics, scoreDiagnostics, score),
         )
       : null;
 
-    const shouldShowShareLink = !options.noScore && options.share && !options.isCi;
+    const showShareLink = shouldShowShareLink(options);
     yield* pause;
     yield* printSummary({
       diagnostics: [...printedDiagnostics],
@@ -1131,7 +1306,7 @@ const finalizeAndRender = (input: FinalizeInput): Effect.Effect<InspectResult> =
       diagnostics: [...printedDiagnostics],
       scoreResult: score,
       projectName: project.projectName,
-      isOffline: !shouldShowShareLink,
+      isOffline: !showShareLink,
     });
 
     return buildResult();

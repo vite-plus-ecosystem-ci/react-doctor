@@ -2,6 +2,7 @@ import { Command, Option } from "commander";
 import { CANONICAL_GITHUB_URL, CI_URL, highlighter } from "@react-doctor/core";
 import { flushSentry, initializeSentry } from "../instrument.js";
 import { ciConfigAction, ciInstallAction, ciUpgradeAction } from "./commands/ci.js";
+import { designAction } from "./commands/design.js";
 import { inspectAction } from "./commands/inspect.js";
 import { installAction } from "./commands/install.js";
 import {
@@ -17,6 +18,7 @@ import {
 import { versionAction } from "./commands/version.js";
 import { whyAction } from "./commands/why.js";
 import { applyColorPreference } from "./utils/apply-color-preference.js";
+import { METRIC, TUI_MIN_NODE_MAJOR_VERSION } from "./utils/constants.js";
 import { ensureWindowsUtf8Console } from "./utils/ensure-windows-utf8-console.js";
 import { exitGracefully } from "./utils/exit-gracefully.js";
 import { guardStdin } from "./utils/guard-stdin.js";
@@ -24,8 +26,10 @@ import { handleError, handleUserError } from "./utils/handle-error.js";
 import { isDebugFlagEnabled } from "./utils/is-debug-flag.js";
 import { isExpectedUserError } from "./utils/is-expected-user-error.js";
 import { isJsonModeActive, writeJsonErrorReport } from "./utils/json-mode.js";
+import { isNonInteractiveEnvironment } from "./utils/is-non-interactive-environment.js";
 import { normalizeHelpInvocation } from "./utils/normalize-help-command.js";
 import { printDebugTrace } from "./utils/print-debug-trace.js";
+import { recordCount } from "./utils/record-metric.js";
 import { assertNoRemovedFlags } from "./utils/removed-cli-flags.js";
 import { reportErrorToSentry } from "./utils/report-error.js";
 import { stripUnknownCliFlags } from "./utils/strip-unknown-cli-flags.js";
@@ -74,6 +78,7 @@ ${formatExampleLines([
   ["react-doctor --scope changed --base main", "scan only new issues vs. main"],
   ["react-doctor --project modules/a,modules/b", "score each module separately (names or paths)"],
   ["react-doctor --staged", "scan staged files (pre-commit hook)"],
+  ["react-doctor design", "run the focused UI design audit"],
   ["react-doctor --category Security", "show only one diagnostic category"],
   ["react-doctor --blocking warning", "fail CI on warnings too (default: error)"],
   ["react-doctor --json > report.json", "write a machine-readable report"],
@@ -107,6 +112,21 @@ ${highlighter.dim("Managing CI:")}
 
 ${highlighter.dim("Learn more:")}
   ${highlighter.info(CANONICAL_GITHUB_URL)}
+`;
+
+const renderDesignHelpEpilog = (): string => `
+${highlighter.dim("Examples:")}
+${formatExampleLines([
+  ["react-doctor design", "audit UI design in the current project"],
+  ["react-doctor design ./apps/web", "audit one application"],
+  ["react-doctor design --verbose", "show every design finding"],
+  ["react-doctor design --json", "write a design-only JSON report"],
+])}
+
+${highlighter.dim("Scope:")}
+  Runs only rules tagged ${highlighter.info("design")}, including focused rules that stay opt-in during a general health scan.
+  Dead-code, supply-chain, external lint-config, custom-plugin, and health-score passes are skipped.
+  Standard scan flags such as ${highlighter.info("--scope")}, ${highlighter.info("--project")}, ${highlighter.info("--verbose")}, and ${highlighter.info("--json")} still work.
 `;
 
 const renderCiHelpEpilog = (): string => `
@@ -145,6 +165,11 @@ const program = new Command()
     "--no-dead-code",
     "skip dead-code analysis (unused files / exports / dependencies, circular imports)",
   )
+  .option("--supply-chain", "enable the dependency supply-chain scan (default)")
+  .option(
+    "--no-supply-chain",
+    "skip the dependency supply-chain scan (Socket.dev dependency health checks)",
+  )
   .option("--verbose", "show every rule and per-file details (default shows top 3 rules)")
   .option(
     "--debug",
@@ -166,9 +191,13 @@ const program = new Command()
   )
   .option(
     "--scope <value>",
-    "how much to scan/report: full (default), files, changed (only new issues vs base), or lines (only changed lines)",
+    "how much supported JS/TS source to scan/report: full (default), files, changed (only new issues vs base), or lines (issues whose source spans touch changed lines)",
   )
   .option("--base <ref>", "base git ref for files/changed/lines scope (auto-detected when omitted)")
+  .option(
+    "--include-untracked",
+    "with --scope files/changed/lines, also scan ordinary untracked files (respects .gitignore)",
+  )
   .addOption(
     // Deprecated alias for `--scope` (warns at runtime). `--diff <base>` →
     // `--scope changed --base <base>`, `--diff false` → `--scope full`. Hidden
@@ -224,6 +253,14 @@ const program = new Command()
   .addHelpText("after", renderRootHelpEpilog);
 
 program.action(inspectAction);
+
+program
+  .command("design [directory]")
+  .description("Run only the focused UI design diagnostics")
+  .addHelpText("after", renderDesignHelpEpilog)
+  .action((directory, _options, command) =>
+    designAction(directory ?? ".", command.optsWithGlobals()),
+  );
 
 program
   .command("why <location>")
@@ -404,6 +441,59 @@ program
   .description("[experimental] run the React Doctor language server over stdio (for editors)")
   .allowUnknownOption()
   .action(() => {});
+
+interface ExperimentalTuiOptions {
+  readonly blocking?: string;
+  readonly deadCode?: boolean;
+  readonly score?: boolean;
+  readonly project?: string;
+  readonly yes?: boolean;
+}
+
+program
+  .command("experimental-tui [directory]", { hidden: true })
+  .description("[experimental] interactive, scrollable scan report")
+  .option(
+    "--blocking <level>",
+    "severity that fails CI: error (default), warning, or none (advisory)",
+  )
+  .option("--color", "force colored output")
+  .option("--no-color", "disable colored output (also honors NO_COLOR)")
+  .option("--no-dead-code", "skip dead-code analysis")
+  .option("--no-score", "skip the score API, the share URL, and crash reporting")
+  .option("-p, --project <names>", "scan specific workspace projects (comma-separated, or *)")
+  .option("-y, --yes", "skip the project prompt and scan every discovered project")
+  .action(async (directory = ".", _localOptions: ExperimentalTuiOptions, command) => {
+    const options: ExperimentalTuiOptions = command.optsWithGlobals();
+    const deadCode = options.deadCode === false ? false : undefined;
+    const noScore = options.score === false ? true : undefined;
+    const nodeMajorVersion = Number(process.versions.node.split(".")[0]);
+    if (
+      process.stdout.isTTY !== true ||
+      process.stdin.isTTY !== true ||
+      isNonInteractiveEnvironment() ||
+      nodeMajorVersion < TUI_MIN_NODE_MAJOR_VERSION
+    ) {
+      await inspectAction(directory, {
+        deadCode,
+        score: options.score === false ? false : undefined,
+        project: options.project,
+        yes: options.yes,
+        blocking: options.blocking,
+      });
+      return;
+    }
+    recordCount(METRIC.cliInvoked, 1, { command: "experimental-tui" });
+    const { runScanApp } = await import("./ink/run-scan-app.js");
+    const { shouldFail } = await runScanApp({
+      directory,
+      options: { deadCode, noScore },
+      projectFlag: options.project,
+      skipPrompts: options.yes ?? false,
+      blocking: options.blocking,
+    });
+    if (shouldFail) process.exitCode = 1;
+  });
 
 // HACK: when stdout is piped into a process that closes early (e.g.
 // `react-doctor . | head`), Node throws an uncaught EPIPE on the next

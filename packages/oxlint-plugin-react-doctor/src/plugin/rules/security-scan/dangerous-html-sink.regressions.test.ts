@@ -99,6 +99,145 @@ describe("security-scan/dangerous-html-sink — regressions", () => {
     expect(findings).toHaveLength(1);
   });
 
+  it("flags prop HTML routed through a const alias", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.tsx",
+      content: `export const Preview = ({ html }: { html: string }) => {
+  const payload = html;
+  return <div dangerouslySetInnerHTML={{ __html: payload }} />;
+};
+`,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it("flags prop HTML routed through an alias after an unrelated same-named binding", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.tsx",
+      content: `const payload = "<strong>static</strong>";
+export const Preview = ({ html }: { html: string }) => {
+  const payload = html;
+  return <div dangerouslySetInnerHTML={{ __html: payload }} />;
+};
+`,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it("ignores an out-of-scope same-named binding when tracing an alias", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.tsx",
+      content: `const payload = props.html;
+const StaticPreview = () => {
+  const payload = "<strong>static</strong>";
+  return payload;
+};
+export const Preview = () => (
+  <div dangerouslySetInnerHTML={{ __html: payload }} />
+);
+`,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it("flags prop HTML routed through a visible helper parameter", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.tsx",
+      content: `const inject = (element: HTMLElement, payload: string) => {
+  element.innerHTML = payload;
+};
+export const Preview = ({ html }: { html: string }) => {
+  const element = document.querySelector("#preview");
+  if (element) inject(element, html);
+};
+`,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it("flags a call-site alias declared after the helper sink", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.tsx",
+      content: `const inject = (element: HTMLElement, payload: string) => {
+  element.innerHTML = payload;
+};
+export const Preview = ({ html }: { html: string }) => {
+  const payload = html;
+  inject(document.body, payload);
+};
+`,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it("does not recurse forever through a self-calling helper", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.tsx",
+      content: `const inject = (element: HTMLElement, payload: string) => {
+  element.innerHTML = payload;
+  inject(element, payload);
+};
+inject(document.body, "<strong>static</strong>");
+`,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("traces a helper parameter before an outer same-named binding", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.tsx",
+      content: `const payload = "<strong>static</strong>";
+const inject = (element: HTMLElement, payload: string) => {
+  element.innerHTML = payload;
+};
+inject(document.body, props.html);
+`,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it("flags prop HTML routed through a function-declaration helper", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.tsx",
+      content: `function inject(element: HTMLElement, payload: string) {
+  element.innerHTML = payload;
+}
+export const Preview = ({ html }: { html: string }) => {
+  const element = document.querySelector("#preview");
+  if (element) inject(element, html);
+};
+`,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it("stays silent when a visible helper receives only static or sanitized HTML", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.tsx",
+      content: `const inject = (element: HTMLElement, payload: string) => {
+  element.innerHTML = payload;
+};
+inject(staticElement, "<strong data-html='static'>Safe</strong>");
+inject(cleanElement, DOMPurify.sanitize(html));
+`,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("stays silent on declaration files with sink-shaped member names", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "lib/types/vimeo-preview-image.d.ts",
+      content: `export interface VimeoPreviewImage {
+  innerHTML: string;
+  html: string;
+}
+declare const preview: VimeoPreviewImage;
+preview.innerHTML = preview.html;
+`,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
   it("flags innerHTML assigned from fetched data", () => {
     const findings = runScanRule(dangerousHtmlSink, {
       relativePath: "src/widgets/banner.ts",
@@ -115,10 +254,53 @@ describe("security-scan/dangerous-html-sink — regressions", () => {
     expect(findings).toHaveLength(0);
   });
 
+  it("stays silent when trusted highlighter output is routed through an alias", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/code-preview.tsx",
+      content: `const highlighted = highlighter.codeToHtml(code);
+const rendered = highlighted.dark;
+return <div dangerouslySetInnerHTML={{ __html: rendered }} />;
+`,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("stays silent when escaping serializer output is routed through an alias", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/code-preview.tsx",
+      content: `const escaped = renderToStaticMarkup(content);
+const rendered = escaped;
+return <div dangerouslySetInnerHTML={{ __html: rendered }} />;
+`,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("flags a highlighter-named alias assigned from user HTML", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/code-preview.tsx",
+      content: `const highlightedHtml = props.html;
+const rendered = highlightedHtml;
+return <div dangerouslySetInnerHTML={{ __html: rendered }} />;
+`,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it("flags a taint-named alias initialized by an opaque call", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.tsx",
+      content: `const content = loadPage();
+return <div dangerouslySetInnerHTML={{ __html: content }} />;
+`,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
   it("stays silent on KaTeX-rendered html identifiers", () => {
     const findings = runScanRule(dangerousHtmlSink, {
       relativePath: "src/katex/katex-block.tsx",
-      content: `const html = useMemo(() => katex.renderToString(code, { displayMode: true }), [code]);\nreturn <div role="math" dangerouslySetInnerHTML={{ __html: html }} />;\n`,
+      content: `import katex from "katex";\nconst html = useMemo(() => katex.renderToString(code, { displayMode: true }), [code]);\nreturn <div role="math" dangerouslySetInnerHTML={{ __html: html }} />;\n`,
     });
     expect(findings).toHaveLength(0);
   });
@@ -636,5 +818,486 @@ describe("security-scan/dangerous-html-sink — regressions", () => {
       content: `return <div dangerouslySetInnerHTML={{ __html: Svg?.outerHTML ?? '' }} />;\n`,
     });
     expect(findings).toHaveLength(0);
+  });
+
+  // Docs-validation FP wave.
+  it("stays silent on member access whose property is i18n-populated (internxt FAQ shape)", () => {
+    const content = [
+      "const questions: { title: string; body: string }[] = [",
+      "  {",
+      "    title: translate('views.account.faq.faq1.title'),",
+      "    body: translate('views.account.faq.faq1.description'),",
+      "  },",
+      "];",
+      "return questions.map((question) => (",
+      "  <DisclosurePanel dangerouslySetInnerHTML={{ __html: question.body }} />",
+      "));",
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/views/account/security/frequently-asked-questions.tsx",
+      content,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("stays silent on per-line highlighter output with a literal fallback (semiotic CodeBlock shape)", () => {
+    const content = [
+      "const highlightedLines = window.Prism && window.Prism.languages[language]",
+      "  ? lines.map((line) => window.Prism.highlight(line, window.Prism.languages[language], language))",
+      "  : lines.map(escapeHtmlText);",
+      "return highlightedLines.map((lineHtml, i) => (",
+      "  <td dangerouslySetInnerHTML={{ __html: lineHtml || ' ' }} />",
+      "));",
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/code-block.js",
+      content,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("stays silent on hidden tooling-directory theme files (.dumi Previewer shape)", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: ".dumi/theme/builtins/preview-default/Previewer.tsx",
+      content: `return <div dangerouslySetInnerHTML={{ __html: props.description }} />;\n`,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("stays silent on a const built purely from string-literal concatenation (HeroCodePreview shape)", () => {
+    const content = [
+      "const html =",
+      '  \'<span class="tok-kw">import</span> { Sidebar } <span class="tok-kw">from</span>;\\n\' +',
+      "  '<span class=\"tok-tag\">Menu</span> content\\n' +",
+      "  '<span class=\"tok-attr\">collapsed</span>';",
+      "export default function HeroCodePreview() {",
+      "  return <code dangerouslySetInnerHTML={{ __html: html }} />;",
+      "}",
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "website/components/home/hero-code-preview.tsx",
+      content,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("stays silent on a deliberate sanitized-html wrapper file (oksskolten shape)", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/ui/sanitized-html.tsx",
+      content: `export function SanitizedHTML({ html, className }: SanitizedHTMLProps) {\n  return <div className={className} dangerouslySetInnerHTML={{ __html: html }} />;\n}\n`,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("stays silent on an identifier declared from an escapeHtml-escaped template (contact-print shape)", () => {
+    const content = [
+      "const html = `<html><body>",
+      '<div><h1>${escapeHtml(name || "Contact")}</h1></div>',
+      "</body></html>`;",
+      "printWindow.document.write(html);",
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "components/contacts/contact-print.ts",
+      content,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("stays silent on an identifier declared from a static template with benign interpolation (hyperdx shape)", () => {
+    const content = [
+      "const scriptContent = `(function(){var k='${STORAGE_KEY}';try{var r=window.matchMedia('(prefers-color-scheme: dark)');}catch(e){}})();`;",
+      "return (",
+      "  <script dangerouslySetInnerHTML={{ __html: scriptContent }} suppressHydrationWarning />",
+      ");",
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/use-user-preferences.tsx",
+      content,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("stays silent on property-style serializer provenance routed through state (json-edit-react shape)", () => {
+    const content = [
+      "const highlight = async (code: string): Promise<Highlighted> => {",
+      "  const hl = await getHighlighter();",
+      "  return { html: hl.codeToHtml(code, { lang: 'tsx', theme: name }), bg, fg };",
+      "};",
+      "export const CodeBlock = ({ code }: CodeBlockProps) => {",
+      "  const [{ html, bg, fg }, setResult] = useState<Highlighted>({ html: '', bg: '#fff', fg: '#000' });",
+      "  return <Box dangerouslySetInnerHTML={{ __html: html }} />;",
+      "};",
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "demo/src/examples/kit/code-block.tsx",
+      content,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("still flags an identifier-with-fallback value without trusted provenance", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.tsx",
+      content: `const bodyHtml = props.body;\nreturn <div dangerouslySetInnerHTML={{ __html: bodyHtml || '' }} />;\n`,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it("still flags a taint-named property read from a helper parameter", () => {
+    const content = [
+      "const renderPreview = (element, data) => {",
+      "  element.innerHTML = data.html;",
+      "};",
+      "renderPreview(preview, loadPreview());",
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.ts",
+      content,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it("stays silent when every taint-named helper parameter receives explicitly trusted HTML", () => {
+    const content = [
+      "const renderPreview = (element, html) => {",
+      "  element.innerHTML = html;",
+      "};",
+      'renderPreview(firstPreview, "<p>Static preview</p>");',
+      "renderPreview(secondPreview, DOMPurify.sanitize(loadPreview()));",
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.ts",
+      content,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("stays silent when trusted helper arguments pass through local aliases", () => {
+    const content = [
+      "const renderPreview = (element, html) => {",
+      "  element.innerHTML = html;",
+      "};",
+      'const staticPreview = "<p>Static preview</p>";',
+      "const sanitizedPreview = DOMPurify.sanitize(loadPreview());",
+      "const serializedPreview = highlighter.codeToHtml(source);",
+      "renderPreview(firstPreview, staticPreview);",
+      "renderPreview(secondPreview, sanitizedPreview);",
+      "renderPreview(thirdPreview, serializedPreview);",
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.ts",
+      content,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("does not let a later trusted binding clear an earlier tainted alias", () => {
+    const content = [
+      "const source = props.userHtml;",
+      "const bodyHtml = source;",
+      "export const renderPreview = (element) => {",
+      '  const source = "<p>Static</p>";',
+      "  element.innerHTML = bodyHtml;",
+      "};",
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.ts",
+      content,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it("flags an externally called helper despite an outer trusted lookalike binding", () => {
+    const content = [
+      'const html = "<p>Static</p>";',
+      "export const renderPreview = (element, html) => {",
+      "  element.innerHTML = html;",
+      "};",
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.ts",
+      content,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it("ignores recursive calls when every external helper argument is trusted", () => {
+    const content = [
+      "function renderPreview(element, html, remaining) {",
+      "  element.innerHTML = html;",
+      "  if (remaining > 0) renderPreview(element, html, remaining - 1);",
+      "}",
+      'renderPreview(preview, "<p>Static</p>", 2);',
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.ts",
+      content,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("prefers a nested tainted binding over a trusted helper parameter", () => {
+    const content = [
+      "const renderPreview = (element, html) => {",
+      "  if (element) {",
+      "    const html = props.userHtml;",
+      "    element.innerHTML = html;",
+      "  }",
+      "};",
+      'renderPreview(preview, "<p>Static</p>");',
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.ts",
+      content,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it("stays silent when a highlighter result member is routed through an alias", () => {
+    const content = [
+      "const result = highlighter.codeToHtml(source);",
+      "const darkHtml = result.dark;",
+      "element.innerHTML = darkHtml;",
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.ts",
+      content,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("flags a helper re-entry that replaces a trusted argument with tainted HTML", () => {
+    const content = [
+      "function renderPreview(element, html, nested) {",
+      "  element.innerHTML = html;",
+      "  if (nested) renderPreview(element, props.userHtml, false);",
+      "}",
+      'renderPreview(preview, "<p>Static</p>", true);',
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.ts",
+      content,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it.each([
+    "DOMPurify.sanitize(props.safeHtml) + props.userHtml",
+    "renderer.codeToHtml(source) + props.userHtml",
+    "process.env.STATIC_HTML + props.userHtml",
+    "`${DOMPurify.sanitize(props.safeHtml)}${props.userHtml}`",
+  ])("does not trust a partially sanitized compound value %#", (valueExpression) => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.ts",
+      content: `const bodyHtml = ${valueExpression};\nelement.innerHTML = bodyHtml;\n`,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it.each(["safeHtml", "SANITIZED_HTML"])(
+    "does not trust a trusted-looking alias whose initializer is tainted: %s",
+    (trustedLookingName) => {
+      const findings = runScanRule(dangerousHtmlSink, {
+        relativePath: "src/components/preview.ts",
+        content: `const ${trustedLookingName} = props.userHtml;\nconst bodyHtml = ${trustedLookingName};\nelement.innerHTML = bodyHtml;\n`,
+      });
+      expect(findings).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    "DOMPurify.sanitize(first) + DOMPurify.sanitize(second)",
+    "`${escapeHtml(first)}${escapeHtml(second)}`",
+  ])("stays silent when every compound value part is trusted %#", (valueExpression) => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.ts",
+      content: `const bodyHtml = ${valueExpression};\nelement.innerHTML = bodyHtml;\n`,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("ignores a recursive call that re-passes the parameter through a local alias", () => {
+    const content = [
+      "function renderPreview(element, html, remaining) {",
+      "  element.innerHTML = html;",
+      "  const nextHtml = html;",
+      "  if (remaining > 0) renderPreview(element, nextHtml, remaining - 1);",
+      "}",
+      'renderPreview(preview, "<p>Static</p>", 2);',
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.ts",
+      content,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("flags a recursive call that reassigns a local parameter alias", () => {
+    const content = [
+      "function renderPreview(element, html, remaining) {",
+      "  element.innerHTML = html;",
+      "  let nextHtml = html;",
+      "  nextHtml = props.userHtml;",
+      "  if (remaining > 0) renderPreview(element, nextHtml, remaining - 1);",
+      "}",
+      'renderPreview(preview, "<p>Static</p>", 2);',
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.ts",
+      content,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it.each(["DOMPurify.sanitize(props.safeHtml)", "highlighter.codeToHtml(source)"])(
+    "does not trust a mutable binding initialized from trusted HTML: %s",
+    (initializer) => {
+      const content = [
+        `let renderedHtml = ${initializer};`,
+        "renderedHtml = props.userHtml;",
+        "element.innerHTML = renderedHtml;",
+      ].join("\n");
+      const findings = runScanRule(dangerousHtmlSink, {
+        relativePath: "src/components/preview.ts",
+        content,
+      });
+      expect(findings).toHaveLength(1);
+    },
+  );
+
+  it("keeps an unmodified mutable sanitized binding trusted", () => {
+    const content = [
+      "let renderedHtml = DOMPurify.sanitize(props.safeHtml);",
+      "other.renderedHtml = props.userHtml;",
+      "element.innerHTML = renderedHtml;",
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.ts",
+      content,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("stays silent when a trusted helper parameter passes through a taint-named alias", () => {
+    const content = [
+      "const renderPreview = (element, html) => {",
+      "  const content = html;",
+      "  element.innerHTML = content;",
+      "};",
+      'renderPreview(firstPreview, "<p>Static preview</p>");',
+      "renderPreview(secondPreview, DOMPurify.sanitize(loadPreview()));",
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.ts",
+      content,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("still flags a taint-named alias reached through an opaque local alias", () => {
+    const content = [
+      "const value = loadPage();",
+      "const content = value;",
+      "element.innerHTML = content;",
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.ts",
+      content,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it("keeps a trusted helper argument containing parentheses intact", () => {
+    const content = [
+      "const renderPreview = (element, html) => {",
+      "  element.innerHTML = html;",
+      "};",
+      'renderPreview(preview, "<p>Static (preview)</p>");',
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.ts",
+      content,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("does not trust a highlighter-named alias from a library-looking prop", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/preview.ts",
+      content: "const highlightedHtml = props.shikiHtml;\nelement.innerHTML = highlightedHtml;\n",
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it("still flags an identifier declared from a template with tainted interpolations", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/widgets/card.ts",
+      content: 'const html = `<div class="card">${props.userHtml}</div>`;\nel.innerHTML = html;\n',
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it("flags unsanitized signature HTML in a webmail composer under a singular email/ UI directory (bulwarkmail shape)", () => {
+    const content = [
+      "const composerSignatureHtml = signatureIdentity?.htmlSignature;",
+      "return (",
+      "  <div",
+      '    className="px-4 pb-3 text-sm"',
+      "    dangerouslySetInnerHTML={{ __html: `${signatureSeparatorEnabled ? '<div>-- </div>' : ''}${composerSignatureHtml}` }}",
+      "  />",
+      ");",
+    ].join("\n");
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "components/email/email-composer.tsx",
+      content,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it("stays silent in a singular email/ directory when the value is sanitized at the sink", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "components/email/email-viewer.tsx",
+      content: `return <div dangerouslySetInnerHTML={{ __html: sanitizePlainTextRenderedHtml(renderedBody) }} />;\n`,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  // FN mining: bracket notation is the same innerHTML sink.
+  it("flags a bracket-notation innerHTML assignment from a tainted source", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/bio.ts",
+      content: `export const renderBio = (element, props) => {\n  element["innerHTML"] = props.bio;\n};\n`,
+    });
+    expect(findings).toHaveLength(1);
+  });
+
+  it("stays silent on a bracket-notation innerHTML assignment of a string literal", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/bio.ts",
+      content: `export const resetBio = (element) => {\n  element["innerHTML"] = "<em>No bio yet</em>";\n};\n`,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("keeps the inert-parse-target exemption for bracket-notation writes", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/utils/decode.ts",
+      content: [
+        "export const decodeEntities = (text) => {",
+        '  const scratch = document.createElement("textarea");',
+        '  scratch["innerHTML"] = text;',
+        "  return scratch.value;",
+        "};",
+      ].join("\n"),
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("flags a bare markup identifier without taint-looking substrings beyond markup", () => {
+    const findings = runScanRule(dangerousHtmlSink, {
+      relativePath: "src/components/comment.ts",
+      content: `export const renderComment = (element, commentMarkup) => {\n  element.innerHTML = commentMarkup;\n};\n`,
+    });
+    expect(findings).toHaveLength(1);
   });
 });

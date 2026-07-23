@@ -2,17 +2,27 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vite-plus/test";
+import { analyzeReducedMotionSource } from "../../core/src/check-reduced-motion.js";
 import { reactDoctorRules } from "../../oxlint-plugin-react-doctor/src/plugin/rule-registry.js";
+import { livenessFixtures } from "../../oxlint-plugin-react-doctor/src/plugin/liveness/liveness-fixtures.js";
+import { defineRule } from "../../oxlint-plugin-react-doctor/src/plugin/utils/define-rule.js";
 import { fuzzRuleWithStats } from "../src/fuzz-rule.js";
 import type { FuzzFinding } from "../src/fuzz-rule.js";
 import { loadFuzzCorpus } from "../src/load-fuzz-corpus.js";
 import type { FuzzCorpusEntry } from "../src/load-fuzz-corpus.js";
-import { DEFAULT_FUZZ_ITERATIONS, DEFAULT_FUZZ_SEED } from "../src/constants.js";
+import {
+  DEFAULT_FUZZ_ITERATIONS,
+  DEFAULT_FUZZ_SEED,
+  DEFAULT_FUZZ_TEST_TIMEOUT_MS,
+  FUZZ_ITERATION_TIMEOUT_BUDGET_MS,
+} from "../src/constants.js";
 
 const isFuzzEnabled = process.env.REACT_DOCTOR_FUZZ === "1";
 const isStrict = process.env.FUZZ_STRICT === "1";
 const shouldCheckInvariants = isStrict || process.env.FUZZ_INVARIANTS === "1";
+const shouldPrintStats = process.env.FUZZ_PRINT_STATS === "1";
 const ruleFilter = process.env.FUZZ_RULE;
+const tagFilter = process.env.FUZZ_TAG;
 
 // A malformed env value silently degrading to zero iterations would make
 // the whole run a false green, so fail loudly instead. Only validated when
@@ -29,14 +39,41 @@ const readPositiveIntegerEnv = (name: string, defaultValue: number): number => {
 };
 const iterations = readPositiveIntegerEnv("FUZZ_ITERATIONS", DEFAULT_FUZZ_ITERATIONS);
 const seed = readPositiveIntegerEnv("FUZZ_SEED", DEFAULT_FUZZ_SEED);
+const fuzzTestTimeoutMs = Math.max(
+  DEFAULT_FUZZ_TEST_TIMEOUT_MS,
+  iterations * FUZZ_ITERATION_TIMEOUT_BUDGET_MS,
+);
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-// The built-in regression corpus (confirmed historical false positives —
-// see corpus/README.md) is always fuzzed; FUZZ_CORPUS_DIR adds external
-// real-world files on top.
+const requireReducedMotionFuzzRule = defineRule({
+  id: "require-reduced-motion",
+  title: "Missing reduced-motion handling",
+  severity: "error",
+  recommendation: "Add real reduced-motion handling for motion-library use.",
+  scan: (file) => {
+    const evidence = analyzeReducedMotionSource({
+      fileName: file.relativePath,
+      sourceText: file.content,
+    });
+    return evidence.hasMotionUse && !evidence.hasReducedMotionHandling
+      ? [{ message: "Motion use has no reduced-motion handling.", line: 1, column: 1 }]
+      : [];
+  },
+});
+
+const fuzzRuleEntries = [
+  ...reactDoctorRules,
+  { id: requireReducedMotionFuzzRule.id, rule: requireReducedMotionFuzzRule },
+];
+
+// The built-in corpus combines confirmed false-positive regressions with
+// intentional liveness targets; FUZZ_CORPUS_DIR adds external real-world
+// files on top.
 const corpusDirectory = process.env.FUZZ_CORPUS_DIR;
 const builtinCorpus: FuzzCorpusEntry[] = isFuzzEnabled
-  ? loadFuzzCorpus(path.join(packageRoot, "corpus"))
+  ? loadFuzzCorpus(path.join(packageRoot, "corpus"), {
+      maximumFiles: Number.POSITIVE_INFINITY,
+    })
   : [];
 const externalCorpus: FuzzCorpusEntry[] =
   isFuzzEnabled && corpusDirectory ? loadFuzzCorpus(corpusDirectory) : [];
@@ -68,14 +105,16 @@ const formatFinding = (finding: FuzzFinding, reproducerPath: string): string =>
     `reproducer: ${reproducerPath}`,
   ].join("\n");
 
-const selectedRules = reactDoctorRules.filter(
-  (entry) => ruleFilter === undefined || entry.id === ruleFilter || entry.id.includes(ruleFilter),
+const selectedRules = fuzzRuleEntries.filter(
+  (entry) =>
+    (ruleFilter === undefined || entry.id === ruleFilter || entry.id.includes(ruleFilter)) &&
+    (tagFilter === undefined || entry.rule.tags?.includes(tagFilter)),
 );
 
 // Adversarial fuzzing of every rule: generated + mutated React/TSX programs
 // with crash, pathological-slowness, and (in strict mode) metamorphic
 // invariance oracles. Opt-in via REACT_DOCTOR_FUZZ=1 (`pnpm fuzz`); tune with
-// FUZZ_RULE=<id substring>, FUZZ_ITERATIONS, FUZZ_SEED, FUZZ_INVARIANTS=1
+// FUZZ_RULE=<id substring>, FUZZ_TAG=<tag>, FUZZ_ITERATIONS, FUZZ_SEED, FUZZ_INVARIANTS=1
 // (warn on invariant violations), FUZZ_STRICT=1 (fail on them too).
 const firedRuleIds = new Set<string>();
 const silentRuleIds = new Set<string>();
@@ -101,39 +140,62 @@ describe.skipIf(!isFuzzEnabled)("adversarial rule fuzzing", () => {
     }
   });
 
-  if (ruleFilter !== undefined && selectedRules.length === 0) {
-    it(`FUZZ_RULE matches at least one rule`, () => {
+  if ((ruleFilter !== undefined || tagFilter !== undefined) && selectedRules.length === 0) {
+    it(`fuzz filters match at least one rule`, () => {
       expect.fail(
-        `FUZZ_RULE=${JSON.stringify(ruleFilter)} matches no registry rule id — nothing was fuzzed`,
+        `FUZZ_RULE=${JSON.stringify(ruleFilter)} and FUZZ_TAG=${JSON.stringify(tagFilter)} match no registry rule — nothing was fuzzed`,
       );
     });
   }
 
   for (const entry of selectedRules) {
-    it(`survives fuzzing: ${entry.id}`, () => {
-      const { findings, stats } = fuzzRuleWithStats(entry.id, entry.rule, {
-        iterations,
-        seed,
-        checkInvariants: shouldCheckInvariants,
-        corpus,
-      });
-      // A rule with crash/slow findings was definitely exercised past its
-      // early bails, so it isn't "silent" even without a diagnostic.
-      const wasExercised = stats.firedProgramCount > 0 || findings.length > 0;
-      (wasExercised ? firedRuleIds : silentRuleIds).add(entry.id);
-      const blockingFindings = isStrict
-        ? findings
-        : findings.filter((finding) => finding.kind !== "invariant-violation");
-      const advisoryFindings = findings.filter((finding) => !blockingFindings.includes(finding));
-      for (const finding of advisoryFindings) {
-        console.warn(formatFinding(finding, writeReproducer(finding)));
-      }
-      if (blockingFindings.length > 0) {
-        const summary = blockingFindings
-          .map((finding) => formatFinding(finding, writeReproducer(finding)))
-          .join("\n\n");
-        expect.fail(`${blockingFindings.length} fuzz finding(s):\n\n${summary}`);
-      }
-    });
+    it(
+      `survives fuzzing: ${entry.id}`,
+      () => {
+        const livenessFixture = livenessFixtures[entry.id];
+        const priorityCorpusEntry =
+          livenessFixture &&
+          livenessFixture.settings === undefined &&
+          livenessFixture.isGeneratedBundle === undefined
+            ? {
+                code: livenessFixture.code,
+                relativePath: livenessFixture.filePath ?? "fixture.tsx",
+              }
+            : undefined;
+        const { findings, stats } = fuzzRuleWithStats(entry.id, entry.rule, {
+          iterations,
+          seed,
+          checkInvariants: shouldCheckInvariants,
+          corpus,
+          priorityCorpusEntry,
+        });
+        if (shouldPrintStats) {
+          console.info(
+            `fuzz stats: ${entry.id} executed=${stats.executedProgramCount} fired=${stats.firedProgramCount} skipped-parse=${stats.skippedParseErrorCount}`,
+          );
+        }
+        // A rule with crash/slow findings was definitely exercised past its
+        // early bails, so it isn't "silent" even without a diagnostic.
+        const wasExercised = stats.firedProgramCount > 0 || findings.length > 0;
+        (wasExercised ? firedRuleIds : silentRuleIds).add(entry.id);
+        const blockingFindings = isStrict
+          ? findings
+          : findings.filter(
+              (finding) =>
+                finding.kind !== "invariant-violation" && finding.kind !== "verdict-drop",
+            );
+        const advisoryFindings = findings.filter((finding) => !blockingFindings.includes(finding));
+        for (const finding of advisoryFindings) {
+          console.warn(formatFinding(finding, writeReproducer(finding)));
+        }
+        if (blockingFindings.length > 0) {
+          const summary = blockingFindings
+            .map((finding) => formatFinding(finding, writeReproducer(finding)))
+            .join("\n\n");
+          expect.fail(`${blockingFindings.length} fuzz finding(s):\n\n${summary}`);
+        }
+      },
+      fuzzTestTimeoutMs,
+    );
   }
 });

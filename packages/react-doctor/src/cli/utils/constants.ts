@@ -20,16 +20,73 @@ export const NODE_ARGUMENT_COUNT = 2;
 export const REACT_DOCTOR_CONFIG_PROJECT_NAME = "react-doctor";
 
 export const STAGED_FILES_TEMP_DIR_PREFIX = "react-doctor-staged-";
+export const STAGED_SNAPSHOT_ADDITIONAL_CONFIG_FILENAMES = [
+  ".babelrc",
+  ".babelrc.json",
+  ".eslintignore",
+  ".eslintrc.json",
+  ".oxlintignore",
+  "app.config.cjs",
+  "app.config.js",
+  "app.config.json",
+  "app.config.mjs",
+  "app.config.ts",
+  "app.json",
+  "babel.config.cjs",
+  "babel.config.js",
+  "babel.config.json",
+  "babel.config.mjs",
+  "eslint.config.cjs",
+  "eslint.config.cts",
+  "eslint.config.js",
+  "eslint.config.mjs",
+  "eslint.config.mts",
+  "eslint.config.ts",
+  "next.config.cjs",
+  "next.config.js",
+  "next.config.mjs",
+  "next.config.ts",
+  "oxlint.config.json",
+  "react-doctor.config.json",
+  "vite.config.cjs",
+  "vite.config.cts",
+  "vite.config.js",
+  "vite.config.mjs",
+  "vite.config.mts",
+  "vite.config.ts",
+  "vitest.config.js",
+  "vitest.config.ts",
+] as const;
 export const BASELINE_FILES_TEMP_DIR_PREFIX = "react-doctor-baseline-";
-// Bump on any breaking change to `CachedScanPayload`'s shape so a stale on-disk
-// cache (missing a newly-required field) is discarded wholesale by
-// `readPersistedCache` instead of deserializing into an invalid payload.
+// Bump on any breaking change to `CachedScanPayload`'s shape or diagnostic
+// semantics so stale on-disk results are discarded wholesale.
 // Bumped to 2: `CachedScanPayload` gained the required `supplyChainOverlapTimedOut`
 // (supply-chain overlap) and `deadCodeOverlapped` (dead-code overlap) fields.
 // Bumped to 3: gained the required `suppressedRuleCounts` field (suppression telemetry).
-export const SCAN_RESULT_CACHE_SCHEMA_VERSION = 3;
+// Bumped to 4: gained the `manifestContentHash` replay guard, which every
+// `lookup` verifies — pre-bump entries without it would never hit again.
+// Bumped to 6: declaration-file parser diagnostic compatibility filtering
+// changed the cached diagnostic set.
+export const SCAN_RESULT_CACHE_SCHEMA_VERSION = 6;
 export const SCAN_RESULT_CACHE_MAX_ENTRY_COUNT = 20;
-export const CACHE_FILENAME_HASH_LENGTH_CHARS = 16;
+export const SCAN_RESULT_CACHE_FILENAME = "scan-cache.json";
+// The dirty-worktree cache-key fingerprint content-hashes every path `git
+// status` reports; past this many entries the hashing could cost more than a
+// cache hit saves, so the key builder bails to null (cache off) — the same
+// worst case as the old clean-tree-only gate.
+export const SCAN_RESULT_CACHE_MAX_DIRTY_STATUS_ENTRY_COUNT = 300;
+// Dirty files larger than this are fingerprinted by `mtimeMs:size` instead of
+// a content hash, bounding the key builder's read cost and memory.
+export const SCAN_RESULT_CACHE_MAX_HASHED_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+
+// Stdout cap for `runGit` (git-hook-shared.ts). Node's default `maxBuffer`
+// is 1 MiB, and `git ls-files -v` alone exceeds that on repos with ~15-25k
+// tracked files (getsentry/sentry: 1.25 MB) — execFileSync then throws
+// ENOBUFS, runGit swallows it into `null`, and the whole-repo scan-result
+// cache silently never stores or serves on exactly the large repos it helps
+// most. 64 MiB clears monorepos with hundreds of thousands of files while
+// still bounding a pathological child.
+export const RUN_GIT_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 
 export const GIT_HOOK_EXECUTABLE_MODE = 0o755;
 
@@ -48,6 +105,43 @@ export const GH_PR_LIST_MAX = 100;
 // Cap on files listed per rule in the agent-handoff prompt so it stays a
 // compact, passable CLI argument.
 export const HANDOFF_MAX_FILES_PER_RULE = 3;
+
+export const TUI_ISSUE_PROMPT_MAX_SITES = 8;
+
+export const TUI_MIN_NODE_MAJOR_VERSION = 22;
+
+export const TUI_LIVE_FEED_MAX_ENTRIES = 25;
+export const TUI_RECENT_LIVE_DIAGNOSTIC_COUNT = 5;
+export const TUI_MODAL_TARGET_WIDTH_CHARS = 44;
+export const TUI_MODAL_MIN_WIDTH_CHARS = 24;
+export const TUI_MODAL_FOOTER_ROWS = 2;
+export const TUI_MODAL_MIN_BODY_ROWS = 6;
+export const TUI_DETAIL_INDENT_COLUMNS = 4;
+export const TUI_PROJECT_SELECT_CHROME_ROWS = 3;
+export const TUI_PROJECT_SELECT_MIN_LIST_ROWS = 1;
+export const TUI_REPORT_HEADER_ROWS = 6;
+export const TUI_REPORT_DETAIL_ROWS = 15;
+export const TUI_REPORT_STATUS_ROWS = 2;
+export const TUI_REPORT_DIVIDER_ROWS = 1;
+export const TUI_REPORT_LIST_MARGIN_ROWS = 1;
+export const TUI_REPORT_MIN_LIST_ROWS = 3;
+export const TUI_REPORT_MIN_WIDTH_CHARS = 24;
+export const TUI_REPORT_WIDE_MIN_COLUMNS = 120;
+export const TUI_REPORT_WIDE_MIN_ROWS = 22;
+export const TUI_REPORT_DETAIL_WIDTH_FRACTION = 0.6;
+export const TUI_REPORT_COLUMN_GUTTER_COLUMNS = 3;
+export const TUI_REPORT_MIN_COLUMN_WIDTH_CHARS = 20;
+export const TUI_SCORE_FACE_OFFSET_COLUMNS = 11;
+export const TUI_SCORE_RIGHT_EDGE_SAFETY_COLUMNS = 2;
+export const TUI_HALF_PAGE_DIVISOR = 2;
+export const TUI_DEFAULT_TERMINAL_COLUMNS = 80;
+export const TUI_DEFAULT_TERMINAL_ROWS = 24;
+export const TUI_HORIZONTAL_PADDING_COLUMNS = 2;
+export const TUI_PROJECT_NAME_GAP_COLUMNS = 2;
+export const TUI_PRINTABLE_ASCII_MIN_CODE_POINT = 32;
+export const TUI_FUZZY_CONSECUTIVE_BONUS = 5;
+export const TUI_FUZZY_WORD_BOUNDARY_BONUS = 10;
+export const TUI_FUZZY_LEADING_PENALTY = 1;
 
 // Social proof for the "Add to CI" pitch (shown in the post-scan handoff
 // prompt and embedded in the agent-handoff prompt).
@@ -105,7 +199,7 @@ export const MINIMUM_VTE_VERSION_FOR_HYPERLINKS = 5000;
 // Last-resort fallback when buildJsonReportError itself throws — keeps
 // stdout valid JSON so downstream parsers don't see a half-written report.
 export const INTERNAL_ERROR_JSON_FALLBACK =
-  '{"schemaVersion":1,"ok":false,"error":{"message":"Internal error","name":"Error","chain":[]}}\n';
+  '{"schemaVersion":3,"version":"unknown","ok":false,"directory":"","mode":"full","diff":null,"projects":[],"diagnostics":[],"summary":{"errorCount":0,"warningCount":0,"affectedFileCount":0,"totalDiagnosticCount":0,"score":null,"scoreLabel":null},"elapsedMilliseconds":0,"error":{"message":"Internal error","name":"Error","chain":[]}}\n';
 
 // Sentry DSN for CLI crash reporting. Public by design (DSNs are safe to
 // embed in client-side code) and only used by the CLI application entry,
@@ -157,6 +251,7 @@ export const METRIC = {
   cliInvoked: "cli.invoked",
   cliError: "cli.error",
   cliEnvironmentError: "cli.env_error",
+  stagedSnapshotDivergence: "staged.snapshot_divergence",
   projectDetected: "project.detected",
   projectPathSelected: "project.path_selected",
   projectConfigSelected: "project.config_selected",
@@ -167,6 +262,11 @@ export const METRIC = {
   scanScore: "scan.score",
   scanClean: "scan.clean",
   scanCheckSkipped: "scan.check_skipped",
+  // One count per completed scan where no project resolved a React /
+  // Preact runtime — the JSON report's `reactDetected: false` case. The
+  // kill metric for the vacuous-clean-scan signal: if it never fires,
+  // nobody points react-doctor at non-React targets and the surface can go.
+  scanNoReactDetected: "scan.no_react_detected",
   baselineDegraded: "baseline.degraded",
   ruleFired: "rule.fired",
   // Rule-rejection telemetry, both keyed by `rule` + `source` attributes:

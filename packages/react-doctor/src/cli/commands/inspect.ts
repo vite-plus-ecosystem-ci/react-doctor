@@ -6,8 +6,10 @@ import * as fs from "node:fs";
 import {
   buildJsonReport,
   DEFAULT_PROJECT_SCAN_CONCURRENCY,
+  getBaselineDiffPlan,
   getChangedLineRanges,
   getDiffInfo,
+  hasReactRuntime,
   highlighter,
   mapWithConcurrency,
   mergeReactDoctorConfigs,
@@ -66,17 +68,20 @@ import {
   resolveProjectChangedLineRanges,
   resolveProjectDiffIncludePaths,
 } from "../utils/resolve-project-diff-include-paths.js";
+import { resolveProjectSourceFilePaths } from "../utils/resolve-project-source-file-paths.js";
 import { runExplain } from "../utils/run-explain.js";
 import { projectManifestChanged } from "../utils/project-manifest-changed.js";
 import { filterScansForSurface } from "../utils/filter-scans-for-surface.js";
 import { selectProjects } from "../utils/select-projects.js";
 import { isSpinnerSilent, setSpinnerSilent, spinner } from "../utils/spinner.js";
-import { shouldBlockCi } from "../utils/should-block-ci.js";
+import { shouldFailScanGate } from "../utils/should-fail-scan-gate.js";
 import { shouldSkipPrompts } from "../utils/should-skip-prompts.js";
 import { warnDeprecatedFailOn } from "../utils/warn-deprecated-fail-on.js";
 import { warnIfAiTrainingEnvironment } from "../utils/warn-ai-training-environment.js";
-import { validateModeFlags } from "../utils/validate-mode-flags.js";
+import { validateIncludeUntrackedScope, validateModeFlags } from "../utils/validate-mode-flags.js";
 import { VERSION } from "../utils/version.js";
+import { findStagedSnapshotDivergences } from "../utils/find-staged-snapshot-divergences.js";
+import { CliInputError } from "../utils/cli-input-error.js";
 
 interface CompletedScan {
   directory: string;
@@ -124,9 +129,14 @@ interface FinalizeScansInput {
 /**
  * Post-scan finalization shared by the staged-arm and project-loop
  * paths of `inspectAction`: emit the JSON report (when in JSON mode)
- * and set `process.exitCode = 1` when a diagnostic at or above the
- * `--blocking` threshold (default `"error"`) reaches the `ciFailure`
- * surface. `--blocking none` keeps the scan advisory (always exits 0).
+ * and set `process.exitCode = 1` when any scan's lint pass hard-failed
+ * (an engine/plugin/binding failure destroys the findings, so success
+ * would be a false clean) or a diagnostic at or above the `--blocking`
+ * threshold (default `"error"`) reaches the `ciFailure` surface.
+ * `--blocking none` keeps the scan advisory (always exits 0), and
+ * fail-open degradations — `--no-lint`, `--max-duration` truncation,
+ * supply-chain/security skips — stay advisory too, surfaced through
+ * `complete: false` in the JSON report.
  */
 const finalizeScans = (input: FinalizeScansInput): void => {
   // Aggregate the per-project baseline deltas into one report-level block so the
@@ -155,6 +165,13 @@ const finalizeScans = (input: FinalizeScansInput): void => {
     input.completedScans.every((scan) => scan.result.baselineDelta !== undefined);
   const baselineDegraded = input.baselineIntended && !baselineComputed;
   const mode: JsonReportMode = baselineDegraded ? "diff" : input.mode;
+  const isReactDetected = input.completedScans.some((scan) => hasReactRuntime(scan.result.project));
+  if (input.completedScans.length > 0 && !isReactDetected) {
+    recordCount(METRIC.scanNoReactDetected, 1);
+    logger.warn(
+      `No React project detected at ${input.resolvedDirectory} — React rules were gated off; this is not the same as a clean scan.`,
+    );
+  }
   const jsonCompletedScans = filterCompletedScansByCategories(
     input.completedScans,
     input.categoryFilters,
@@ -186,10 +203,14 @@ const finalizeScans = (input: FinalizeScansInput): void => {
     );
   }
 
-  if (input.isScoreOnly || baselineDegraded) return;
-
-  const ciFailureDiagnostics = filterScansForSurface(input.completedScans, "ciFailure");
-  if (shouldBlockCi(ciFailureDiagnostics, resolveBlockingLevel(input.flags, input.userConfig))) {
+  const blockingLevel = resolveBlockingLevel(input.flags, input.userConfig);
+  if (
+    shouldFailScanGate({
+      scans: input.completedScans,
+      blockingLevel,
+      diagnosticsAreGateExempt: input.isScoreOnly || baselineDegraded,
+    })
+  ) {
     process.exitCode = 1;
   }
 };
@@ -232,7 +253,11 @@ const maybeMigrateLegacyConfig = async (
   await runProjectMigrations(requestedDirectory);
 };
 
-export const inspectAction = async (directory: string, flags: InspectFlags): Promise<void> => {
+export const inspectAction = async (
+  directory: string,
+  flags: InspectFlags,
+  invocationCommand = "inspect",
+): Promise<void> => {
   const isScoreOnly = Boolean(flags.score);
   const isJsonMode = Boolean(flags.json);
   const isQuiet = isScoreOnly || isJsonMode;
@@ -252,10 +277,12 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
   }
   // Recorded after JSON mode is enabled so the metric's run attributes reflect
   // the true `jsonMode` (run context is rebuilt per emit in `record-metric.ts`).
-  recordCount(METRIC.cliInvoked, 1, { command: "inspect" });
+  recordCount(METRIC.cliInvoked, 1, { command: invocationCommand });
 
   try {
     validateModeFlags(flags);
+
+    if (flags.staged) setJsonReportMode("staged");
 
     await maybeMigrateLegacyConfig(requestedDirectory, {
       isQuiet,
@@ -276,6 +303,26 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
         `Redirected to ${highlighter.info(toRelativePath(resolvedDirectory, requestedDirectory))} via react-doctor config "rootDir".`,
       );
       logger.break();
+    }
+
+    // Checked against the resolved directory (after any `rootDir` redirect) —
+    // the staged scan materializes from there, so a divergence check on the
+    // requested directory would let a redirected repo's mixed snapshot through.
+    if (flags.staged) {
+      const divergentConfigFiles = findStagedSnapshotDivergences(resolvedDirectory);
+      if (divergentConfigFiles === null) {
+        throw new CliInputError(
+          "Could not verify that staged configuration matches the worktree. Run the command from a Git worktree with Git available.",
+        );
+      }
+      if (divergentConfigFiles.length > 0) {
+        recordCount(METRIC.stagedSnapshotDivergence, 1, {
+          divergentInputCount: divergentConfigFiles.length,
+        });
+        throw new CliInputError(
+          `Cannot scan staged files while configuration differs between the index and worktree: ${divergentConfigFiles.join(", ")}. Stage or restore those files, then rerun react-doctor --staged.`,
+        );
+      }
     }
 
     const explainArgument = flags.explain;
@@ -321,7 +368,6 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
     const skipPrompts = shouldSkipPrompts({ yes: flags.yes, json: flags.json });
 
     if (flags.staged) {
-      setJsonReportMode("staged");
       const stagedFiles = await getStagedSourceFiles(resolvedDirectory);
       if (stagedFiles.length === 0) {
         if (isJsonMode) {
@@ -434,6 +480,9 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
       ? buildChangedFilesDiffInfo(readChangedFilesFrom(path.resolve(flags.changedFilesFrom)))
       : null;
     const requestedScope = resolveScope(flags, userConfig);
+    // Untracked files only exist in a local working tree, so this is a
+    // CLI-only modifier (like `--staged`) — off unless the user opts in.
+    const includeUntracked = flags.includeUntracked ?? false;
     // The internal `--changed-files-from` path (the GitHub Action) implies the
     // `changed` scope when the user didn't pick one explicitly — it always ran
     // in diff mode historically.
@@ -441,6 +490,10 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
       requestedScope.scope === undefined && changedFilesDiffInfo !== null
         ? { ...requestedScope, scope: "changed" }
         : requestedScope;
+    // Validate against the EFFECTIVE scope (post `--changed-files-from`
+    // promotion), so a working-tree scope from a flag, `config.scope` /
+    // `config.diff`, or that internal path all satisfy the requirement.
+    validateIncludeUntrackedScope(includeUntracked, scopeRequest.scope);
     const wantsDiffMode = scopeRequest.scope !== undefined && scopeRequest.scope !== "full";
     // HACK: also call getDiffInfo when we MIGHT prompt the user — without it the
     // "full vs changed" prompt never appears for users on a feature branch who
@@ -450,7 +503,9 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
       (wantsDiffMode || (scopeRequest.scope === undefined && !skipPrompts && !isQuiet));
     const diffInfo =
       changedFilesDiffInfo ??
-      (shouldDetectDiff ? await getDiffInfo(resolvedDirectory, scopeRequest.base) : null);
+      (shouldDetectDiff
+        ? await getDiffInfo(resolvedDirectory, scopeRequest.base, includeUntracked)
+        : null);
     const scope = await finalizeScope({ requested: scopeRequest, diffInfo, skipPrompts, isQuiet });
     const isDiffMode = scope !== "full";
 
@@ -470,6 +525,8 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
         : null;
     // `changed` subtracts pre-existing findings (baseline); `files` / `lines` do not.
     const baselineRef = scope === "changed" ? comparisonBaseRef : null;
+    const baselineDiffPlan =
+      baselineRef === null ? null : await getBaselineDiffPlan(resolvedDirectory, baselineRef);
 
     // `--scope lines`: per-file changed line ranges (repo-relative). Working-tree
     // vs HEAD for uncommitted changes, vs the merge-base otherwise. When no base
@@ -489,6 +546,7 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
             directory: resolvedDirectory,
             baseRef: linesBaseRef ?? undefined,
             files: [...diffInfo.changedFiles],
+            includeUntracked,
           })
         : null;
     if (scope === "lines" && changedLineRanges === null && !isQuiet) {
@@ -541,13 +599,29 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
         projectScanTarget.userConfig?.plugins === undefined
           ? scanTarget.configSourceDirectory
           : projectScanTarget.configSourceDirectory;
-      // The Socket supply-chain check runs by default; opted out per project
-      // config. Off ⇒ a manifest-only diff change shouldn't pull a project into
-      // the scan (there'd be nothing to report).
-      const supplyChainEnabled = projectConfig?.supplyChain?.enabled !== false;
+      // The Socket supply-chain check runs by default; opted out by
+      // `--no-supply-chain` (wins) or per-project config. Off ⇒ a manifest-only
+      // diff change shouldn't pull a project into the scan (nothing to report).
+      const supplyChainEnabled = flags.supplyChain ?? projectConfig?.supplyChain?.enabled !== false;
 
       let includePaths: string[] | undefined;
       let supplyChainManifestChanged = false;
+      const projectBaselineBaseFiles =
+        baselineDiffPlan === null
+          ? null
+          : resolveProjectSourceFilePaths(
+              resolvedDirectory,
+              scanDirectory,
+              baselineDiffPlan.baseFiles,
+            );
+      const projectBaselineHeadFiles =
+        baselineDiffPlan === null
+          ? null
+          : resolveProjectSourceFilePaths(
+              resolvedDirectory,
+              scanDirectory,
+              baselineDiffPlan.headFiles,
+            );
       if (isDiffMode) {
         const changedSourceFiles =
           diffInfo === null
@@ -560,7 +634,12 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
           supplyChainEnabled &&
           diffInfo !== null &&
           projectManifestChanged(resolvedDirectory, scanDirectory, diffInfo);
-        if (changedSourceFiles.length === 0 && !supplyChainManifestChanged) {
+        const hasBaselineOnlyFiles = (projectBaselineBaseFiles?.length ?? 0) > 0;
+        if (
+          changedSourceFiles.length === 0 &&
+          !supplyChainManifestChanged &&
+          !hasBaselineOnlyFiles
+        ) {
           if (!isQuiet) {
             logger.dim(`No changed source files in ${scanDirectory}, skipping.`);
             logger.break();
@@ -573,6 +652,9 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
         // materialize the base manifest, so the delta filters out pre-existing
         // low-score dependencies instead of reporting them as newly introduced.
         includePaths = [...changedSourceFiles];
+        if (includePaths.length === 0 && hasBaselineOnlyFiles) {
+          includePaths.push(...(projectBaselineBaseFiles ?? []));
+        }
         if (supplyChainManifestChanged) includePaths.push("package.json");
       }
 
@@ -589,7 +671,16 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
         // Pool members overlap; they must not own the process-global Sentry
         // run state (see `InspectOptions.concurrentScan`).
         concurrentScan: isMultiProject,
-        baseline: baselineRef ? { ref: baselineRef } : undefined,
+        baseline:
+          baselineRef !== null &&
+          projectBaselineBaseFiles !== null &&
+          projectBaselineHeadFiles !== null
+            ? {
+                ref: baselineRef,
+                baseFiles: projectBaselineBaseFiles,
+                headFiles: projectBaselineHeadFiles,
+              }
+            : undefined,
         changedLineRanges:
           scope === "lines" && changedLineRanges !== null
             ? resolveProjectChangedLineRanges(resolvedDirectory, scanDirectory, changedLineRanges)
@@ -641,7 +732,7 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
     }
 
     if (!isQuiet && isMultiProject && completedScans.length > 0) {
-      const shouldShowShareLink =
+      const showShareLink =
         !isShareOptedOut(completedScans, scanOptions.noScore) && !scanOptions.isCi;
       await Effect.runPromise(
         printMultiProjectSummary({
@@ -649,7 +740,7 @@ export const inspectAction = async (directory: string, flags: InspectFlags): Pro
           categoryFilters,
           verbose: Boolean(flags.verbose),
           outputDirectory: flags.outputDir,
-          isOffline: !shouldShowShareLink,
+          isOffline: !showShareLink,
           projectName: path.basename(resolvedDirectory),
           totalElapsedMilliseconds: performance.now() - scanLoopStartTime,
         }),

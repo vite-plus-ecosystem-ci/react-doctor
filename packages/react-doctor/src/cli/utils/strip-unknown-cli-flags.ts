@@ -14,6 +14,7 @@ const ROOT_FLAG_SPEC: CliFlagSpec = {
     "--dead-code",
     "--debug",
     "--help",
+    "--include-untracked",
     "--json",
     "--json-compact",
     "--lint",
@@ -23,10 +24,12 @@ const ROOT_FLAG_SPEC: CliFlagSpec = {
     "--no-parallel",
     "--no-respect-inline-disables",
     "--no-score",
+    "--no-supply-chain",
     "--no-telemetry",
     "--no-warnings",
     "--score",
     "--staged",
+    "--supply-chain",
     "--verbose",
     "--version",
     "--warnings",
@@ -125,13 +128,34 @@ const WHY_FLAG_SPEC: CliFlagSpec = {
   shortOptionsWithRequiredValues: new Set(["-c"]),
 };
 
+// `experimental-tui [directory]` mirrors the root scan's negatable dead-code /
+// score knobs plus project selection. Without this entry the pre-parse strip
+// falls back to ROOT_FLAG_SPEC, which drops `-p` and turns its value into the
+// directory positional.
+const EXPERIMENTAL_TUI_FLAG_SPEC: CliFlagSpec = {
+  longOptionsWithoutValues: new Set([
+    "--color",
+    "--help",
+    "--no-color",
+    "--no-dead-code",
+    "--no-score",
+    "--yes",
+  ]),
+  longOptionsWithRequiredValues: new Set(["--blocking", "--project"]),
+  longOptionsWithOptionalValues: new Set(),
+  shortOptionsWithoutValues: new Set(["-h", "-y"]),
+  shortOptionsWithRequiredValues: new Set(["-p"]),
+};
+
 const COMMAND_FLAG_SPECS = new Map<string, CliFlagSpec>([
+  ["design", ROOT_FLAG_SPEC],
   ["install", INSTALL_FLAG_SPEC],
   ["setup", INSTALL_FLAG_SPEC],
   ["version", VERSION_FLAG_SPEC],
   ["rules", RULES_FLAG_SPEC],
   ["ci", CI_FLAG_SPEC],
   ["why", WHY_FLAG_SPEC],
+  ["experimental-tui", EXPERIMENTAL_TUI_FLAG_SPEC],
 ]);
 
 const isFlagLike = (argument: string): boolean => argument.startsWith("-") && argument !== "-";

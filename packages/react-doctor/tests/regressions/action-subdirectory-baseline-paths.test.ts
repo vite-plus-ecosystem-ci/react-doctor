@@ -32,11 +32,12 @@ afterAll(() => {
   fs.rmSync(tempRoot, { recursive: true, force: true });
 });
 
-// `no-array-index-key` fires once per `key={index}` usage, so the finding
-// count is deterministic: N usages → N diagnostics. It's `defaultEnabled:
-// false`, so the config override turns it on for both the head and base
-// passes (baseline reuses the same user config).
-const RULE = "react-doctor/no-array-index-key";
+// `no-array-index-as-key` fires once per `key={index}` usage, so the finding
+// count is deterministic: N usages → N diagnostics. The config override pins
+// it on for both the head and base passes (baseline reuses the same user
+// config). (`no-array-index-key` used to be the vehicle here, but its JSX
+// path is now delegated to this canonical rule.)
+const RULE = "react-doctor/no-array-index-as-key";
 const CONFIG_OVERRIDE: ReactDoctorConfig = { rules: { [RULE]: "warn" } };
 
 // One `key={index}` per mapped row → exactly `findingCount` diagnostics.
@@ -92,7 +93,8 @@ describe("#858: subdirectory baseline resolves changed-file paths against the sc
           configOverride: CONFIG_OVERRIDE,
         });
       const findings = (result: Awaited<ReturnType<typeof scanUi>>): number =>
-        result.diagnostics.filter((diagnostic) => diagnostic.rule === "no-array-index-key").length;
+        result.diagnostics.filter((diagnostic) => diagnostic.rule === "no-array-index-as-key")
+          .length;
 
       // A baseline-free head scan = the full finding set in the changed file
       // (relational reference, so the assertions don't hard-code the rule's
@@ -101,6 +103,11 @@ describe("#858: subdirectory baseline resolves changed-file paths against the sc
       expect(headOnly.skippedChecks).not.toContain("lint");
       const headTotal = findings(headOnly);
       expect(headTotal).toBeGreaterThan(0);
+
+      writeFile(
+        path.join(uiDir, "src/unrelated-untracked.tsx"),
+        "export const unrelated = true;\n",
+      );
 
       // The fix: scan-relative paths, as the patched action now emits.
       const fixed = await scanUi([widgetRelative], { ref: baseRef });
@@ -112,11 +119,17 @@ describe("#858: subdirectory baseline resolves changed-file paths against the sc
       // ...but pre-existing ones are subtracted, not re-reported as new.
       expect(findings(fixed)).toBeLessThan(headTotal);
 
-      // The bug: repo-relative paths (the pre-fix action output) double the
-      // prefix, so `git show <base>:./UI/src/widget.tsx` misses and the base
-      // count collapses to 0 — the exact signal in #858 (every finding "new").
+      // A repo-relative path still misses the head scan, but the side-aware
+      // plan now notices that the real changed head file was not analyzed and
+      // degrades instead of claiming that every base finding was fixed or new.
       const buggy = await scanUi([path.join("UI", widgetRelative)], { ref: baseRef });
-      expect(buggy.baselineDelta?.baseTotalCount).toBe(0);
+      expect(buggy.baselineDelta).toBeUndefined();
+
+      fs.renameSync(path.join(uiDir, widgetRelative), path.join(uiDir, "src/moved-widget.tsx"));
+      const unstagedRename = await scanUi([widgetRelative], { ref: baseRef });
+      expect(unstagedRename.baselineDelta).toBeDefined();
+      expect(unstagedRename.baselineDelta?.baseTotalCount).toBeGreaterThan(0);
+      expect(unstagedRename.baselineDelta?.fixedCount).toBe(0);
     } finally {
       consoleSpy.mockRestore();
       fs.rmSync(repoDir, { recursive: true, force: true });

@@ -5,11 +5,12 @@ import { defineRule } from "../../utils/define-rule.js";
 import { getCallbackStatements } from "../../utils/get-callback-statements.js";
 import { getEffectCallback } from "../../utils/get-effect-callback.js";
 import { getRootIdentifierName } from "../../utils/get-root-identifier-name.js";
-import { isHookCall } from "../../utils/is-hook-call.js";
+import { isReactHookCall } from "../../utils/is-react-hook-call.js";
 import { isInitialOnlyPropName } from "../../utils/is-initial-only-prop-name.js";
 import { isSetterIdentifier } from "../../utils/is-setter-identifier.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { RuleContext } from "../../utils/rule-context.js";
+import { unwrapDiscardedExpression } from "../../utils/unwrap-discarded-expression.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 
 // HACK: §1 of "You Might Not Need an Effect" — mirroring a prop into
@@ -54,6 +55,26 @@ interface MirrorBinding {
   propRootName: string;
 }
 
+// Docs-validation r2 FP (EditorialCheckCard):
+// `useEffect(() => setDraft(value), [value, resetNonce])` — the extra
+// dep is a deliberate second re-seed trigger (revert-after-failed-save
+// nonce), which is the doc's stated exemption: "a transient local edit
+// that is intentionally re-synced to the prop on a separate trigger".
+// A pure mirror re-syncs only when the mirrored prop changes; an
+// unused extra dep is never demanded by exhaustive-deps, so its
+// presence means the author wired a separate trigger. The setter
+// itself is exempt (`[value, setValue]` is lint appeasement, not a
+// trigger).
+const hasOnlyMirrorDeps = (
+  depIdentifierNames: ReadonlySet<string>,
+  binding: MirrorBinding,
+): boolean => {
+  for (const depName of depIdentifierNames) {
+    if (depName !== binding.propRootName && depName !== binding.setterName) return false;
+  }
+  return true;
+};
+
 export const noMirrorPropEffect = defineRule({
   id: "no-mirror-prop-effect",
   title: "Prop mirrored into state via effect",
@@ -85,7 +106,7 @@ export const noMirrorPropEffect = defineRule({
             continue;
           }
           if (!isNodeOfType(declarator.init, "CallExpression")) continue;
-          if (!isHookCall(declarator.init, "useState")) continue;
+          if (!isReactHookCall(declarator.init, "useState", context.scopes)) continue;
           const initializer = declarator.init.arguments?.[0];
           if (!initializer) continue;
           const propRootName = getPropRootName(initializer, propNames);
@@ -108,18 +129,13 @@ export const noMirrorPropEffect = defineRule({
       // anyway.
       for (const statement of componentBody.body ?? []) {
         if (!isNodeOfType(statement, "ExpressionStatement")) continue;
-        const effectCall = statement.expression;
+        const effectCall = unwrapDiscardedExpression(statement);
         if (!isNodeOfType(effectCall, "CallExpression")) continue;
-        if (!isHookCall(effectCall, EFFECT_HOOK_NAMES)) continue;
+        if (!isReactHookCall(effectCall, EFFECT_HOOK_NAMES, context.scopes)) continue;
         if ((effectCall.arguments?.length ?? 0) < 2) continue;
 
         const depsNode = effectCall.arguments[1];
         if (!isNodeOfType(depsNode, "ArrayExpression")) continue;
-        // HACK: previously required EXACTLY one dep, which silently
-        // missed the legitimate `useEffect(() => setX(value), [value, otherDep])`
-        // mirror shape. Now we accept any deps array as long as the
-        // prop root we mirror IS one of the deps — `otherDep` being
-        // unused inside the body is a separate (exhaustive-deps) concern.
         const depIdentifierNames = new Set<string>();
         for (const element of depsNode.elements ?? []) {
           if (isNodeOfType(element, "Identifier")) depIdentifierNames.add(element.name);
@@ -131,9 +147,7 @@ export const noMirrorPropEffect = defineRule({
         const bodyStatements = getCallbackStatements(callback);
         if (bodyStatements.length !== 1) continue;
         const onlyStatement = bodyStatements[0];
-        const expression = isNodeOfType(onlyStatement, "ExpressionStatement")
-          ? onlyStatement.expression
-          : onlyStatement;
+        const expression = unwrapDiscardedExpression(onlyStatement);
         if (!isNodeOfType(expression, "CallExpression")) continue;
         if (!isNodeOfType(expression.callee, "Identifier")) continue;
         if (!isSetterIdentifier(expression.callee.name)) continue;
@@ -145,6 +159,7 @@ export const noMirrorPropEffect = defineRule({
           (binding) =>
             binding.setterName === calleeName &&
             depIdentifierNames.has(binding.propRootName) &&
+            hasOnlyMirrorDeps(depIdentifierNames, binding) &&
             areExpressionsStructurallyEqual(binding.initializer, setterArgument),
         );
         if (!matchedBinding) continue;

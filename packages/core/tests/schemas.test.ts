@@ -1,6 +1,12 @@
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
-import { buildDiagnosticIdentity, JsonReportV1, Severity } from "@react-doctor/core";
+import {
+  buildDiagnosticIdentity,
+  JsonReportV1,
+  JsonReportV2,
+  JsonReportV3,
+  Severity,
+} from "@react-doctor/core";
 // `Diagnostic` and `JsonReport` are imported directly from the
 // `schemas.js` module rather than the package barrel because the
 // barrel intentionally elides them — the same names exist as TS
@@ -136,8 +142,12 @@ describe("buildDiagnosticIdentity", () => {
         column: 4,
         plugin: "react-doctor",
         rule: "no-derived-state",
+        severity: "error",
+        message: "message",
       }),
-    ).toBe("/repo/src/App.tsx::12:4::react-doctor/no-derived-state");
+    ).toBe(
+      "/repo/src/App.tsx::12:4::react-doctor/no-derived-state::051b69accd5cad53adeeb95537b4a437a702d7e3a422ca87fad64d774a71c997",
+    );
   });
 
   it("is deterministic across calls with the same input", () => {
@@ -147,6 +157,8 @@ describe("buildDiagnosticIdentity", () => {
       column: 1,
       plugin: "p",
       rule: "r",
+      severity: "warning",
+      message: "message",
     } as const;
     expect(buildDiagnosticIdentity(inputs)).toBe(buildDiagnosticIdentity(inputs));
   });
@@ -158,6 +170,8 @@ describe("buildDiagnosticIdentity", () => {
       column: 1,
       plugin: "p",
       rule: "r",
+      severity: "warning",
+      message: "message",
     } as const;
     const seen = new Set<string>();
     seen.add(buildDiagnosticIdentity(base));
@@ -166,7 +180,9 @@ describe("buildDiagnosticIdentity", () => {
     seen.add(buildDiagnosticIdentity({ ...base, column: 2 }));
     seen.add(buildDiagnosticIdentity({ ...base, plugin: "q" }));
     seen.add(buildDiagnosticIdentity({ ...base, rule: "s" }));
-    expect(seen.size).toBe(6);
+    seen.add(buildDiagnosticIdentity({ ...base, severity: "error" }));
+    seen.add(buildDiagnosticIdentity({ ...base, message: "other" }));
+    expect(seen.size).toBe(8);
   });
 });
 
@@ -240,6 +256,107 @@ describe("JsonReport (v1)", () => {
           scoreLabel: null,
         },
         elapsedMilliseconds: 0,
+        error: null,
+      }),
+    ).toThrow();
+  });
+});
+
+describe("JsonReport version compatibility", () => {
+  const summary = {
+    errorCount: 0,
+    warningCount: 0,
+    affectedFileCount: 0,
+    totalDiagnosticCount: 0,
+    score: null,
+    scoreLabel: null,
+  };
+
+  it("retains v2 decoding", () => {
+    const decoded = Schema.decodeUnknownSync(JsonReport)({
+      schemaVersion: 2,
+      version: "0.7.4",
+      ok: true,
+      directory: "/repo",
+      mode: "baseline",
+      diff: null,
+      baseline: {
+        baseRef: "abc123",
+        newCount: 0,
+        fixedCount: 1,
+        baseTotalCount: 1,
+      },
+      projects: [],
+      diagnostics: [],
+      summary,
+      elapsedMilliseconds: 10,
+      error: null,
+    });
+    expect(decoded.schemaVersion).toBe(2);
+    expect(decoded instanceof JsonReportV2).toBe(true);
+  });
+
+  it("decodes the dedicated v3 coverage schemas", () => {
+    const decoded = Schema.decodeUnknownSync(JsonReport)({
+      schemaVersion: 3,
+      version: "0.7.4",
+      ok: true,
+      directory: "/repo",
+      mode: "full",
+      diff: null,
+      projects: [
+        {
+          directory: "/repo",
+          packageRoot: ".",
+          framework: "vite",
+          project: {},
+          diagnostics: [],
+          score: null,
+          skippedChecks: [],
+          analyzedFiles: ["src/App.tsx"],
+          analyzedFileCount: 1,
+          complete: true,
+          scannedFileCount: 1,
+          elapsedMilliseconds: 10,
+        },
+      ],
+      diagnostics: [],
+      summary,
+      elapsedMilliseconds: 10,
+      error: null,
+    });
+    expect(decoded.schemaVersion).toBe(3);
+    expect(decoded instanceof JsonReportV3).toBe(true);
+  });
+
+  it("rejects a v3 project with an unknown framework", () => {
+    expect(() =>
+      Schema.decodeUnknownSync(JsonReport)({
+        schemaVersion: 3,
+        version: "0.7.4",
+        ok: true,
+        directory: "/repo",
+        mode: "full",
+        diff: null,
+        projects: [
+          {
+            directory: "/repo",
+            packageRoot: ".",
+            framework: "invalid-framework",
+            project: {},
+            diagnostics: [],
+            score: null,
+            skippedChecks: [],
+            analyzedFiles: ["src/App.tsx"],
+            analyzedFileCount: 1,
+            complete: true,
+            scannedFileCount: 1,
+            elapsedMilliseconds: 10,
+          },
+        ],
+        diagnostics: [],
+        summary,
+        elapsedMilliseconds: 10,
         error: null,
       }),
     ).toThrow();

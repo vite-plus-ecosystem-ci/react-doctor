@@ -202,15 +202,24 @@ export const PUBLIC_ENV_SECRET_NAME_PATTERN =
   /\b(?:NEXT_PUBLIC|VITE|REACT_APP|EXPO_PUBLIC)_[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PRIVATE|DATABASE_URL|SERVICE_ROLE|AWS_ACCESS_KEY|AWS_SECRET)[A-Z0-9_]*\b/i;
 
 export const FULL_ENV_LEAK_CONTEXT_PATTERN =
-  /\b(?:process\.env|import\.meta\.env|window\.__[A-Z0-9_]*ENV[A-Z0-9_]*__|__[A-Z0-9_]*ENV[A-Z0-9_]*__)\b/;
+  /\b(?:process\s*\.\s*env|import\s*\.\s*meta\s*\.\s*env|window\.__[A-Z0-9_]*ENV[A-Z0-9_]*__|__[A-Z0-9_]*ENV[A-Z0-9_]*__)\b/;
+
+export const FULL_ENV_LEAK_COMMENT_TRIVIA_PATTERN =
+  /\b(?:(?:process|window)\s*(?:\/[*/]|<!--|-->|\.\s*(?:\/[*/]|<!--|-->))|import\s*(?:\/[*/]|<!--|-->|\.\s*(?:\/[*/]|<!--|-->|meta\s*(?:\/[*/]|<!--|-->|\.\s*(?:\/[*/]|<!--|-->)))))/;
 
 export const FULL_ENV_LEAK_SECRET_NAME_PATTERN =
   /\b(?:DATABASE_URL|AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|MAILGUN_API_KEY|SALESFORCE_CLIENT_SECRET|OKTA_CLIENT_SECRET|SESSION_SECRET|COOKIE_SECRET|PRIVATE_KEY|SERVICE_ROLE)\b/;
 
 // TODO(follow-up): de-overfit — several vendor names here mirror specific
 // regression fixtures (TLDRAW / POSTHOG / ALGOLIA / GC_API_KEY).
+// `FACEBOOK_CLIENT_TOKEN` is Meta's designated client-embeddable token,
+// documented as safe to ship in app binaries. The trailing metadata-suffix
+// branch exempts names that only REFERENCE a credential (`…_TOKEN_KIND`,
+// `…_TOKEN_URL`, `…_TOKEN_ENDPOINT`): their values are labels, URLs, or
+// header names, not credentials. The suffix must directly follow the secret
+// keyword so `DATABASE_URL` (the URL IS the secret) keeps firing.
 export const TRUSTED_PUBLIC_SECRET_NAME_PATTERN =
-  /(?:SENTRY_DSN|PUBLIC_KEY|PUBLISHABLE|ANON_KEY|POSTHOG_(?:PROJECT_)?TOKEN|POSTHOG_KEY|TLDRAW_LICENSE_KEY|CLERK_PUBLISHABLE_KEY|ALGOLIA_SEARCH_KEY|GC_API_KEY|GOOGLE_MAPS_API_KEY|MAPBOX_TOKEN|MIXPANEL_TOKEN|(?:NEXT_PUBLIC|VITE|REACT_APP|EXPO_PUBLIC)_(?:DISABLE|ENABLE|ALLOW|REQUIRE)_)/i;
+  /(?:SENTRY_DSN|PUBLIC_KEY|PUBLISHABLE|ANON_KEY|POSTHOG_(?:PROJECT_)?TOKEN|POSTHOG_KEY|TLDRAW_LICENSE_KEY|CLERK_PUBLISHABLE_KEY|ALGOLIA_SEARCH_KEY|GC_API_KEY|GOOGLE_MAPS_API_KEY|MAPBOX_TOKEN|MIXPANEL_TOKEN|FACEBOOK_CLIENT_TOKEN|(?:NEXT_PUBLIC|VITE|REACT_APP|EXPO_PUBLIC)_(?:DISABLE|ENABLE|ALLOW|REQUIRE)_)|(?:TOKEN|SECRET|PASSWORD|PRIVATE)_(?:KIND|TYPE|URL|URI|ENDPOINT|HEADER|NAME)$/i;
 
 // Public, client-safe keys designed to ship in the browser, each with a
 // prefix distinct from the same vendor's secret key (RevenueCat `appl_`

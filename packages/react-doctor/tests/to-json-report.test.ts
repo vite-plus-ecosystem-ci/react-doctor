@@ -29,7 +29,10 @@ const buildDiagnoseResult = (): DiagnoseResult => ({
     framework: "vite",
     hasTypeScript: true,
     hasReactCompiler: false,
-    hasTanStackQuery: false,
+    hasI18nLibrary: false,
+    tanstackQueryVersion: null,
+    mobxVersion: null,
+    styledComponentsVersion: null,
     nextjsVersion: null,
     nextjsMajorVersion: null,
     hasReactNativeWorkspace: false,
@@ -50,7 +53,7 @@ describe("toJsonReport (Node API helper)", () => {
     const result = buildDiagnoseResult();
     const report = toJsonReport(result, { version: "1.2.3" });
 
-    expect(report.schemaVersion).toBe(1);
+    expect(report.schemaVersion).toBe(3);
     expect(report.ok).toBe(true);
     expect(report.version).toBe("1.2.3");
     expect(report.directory).toBe("/virtual");
@@ -58,6 +61,19 @@ describe("toJsonReport (Node API helper)", () => {
     expect(report.projects).toHaveLength(1);
     expect(report.projects[0].project).toBe(result.project);
     expect(report.diagnostics).toEqual(report.projects[0].diagnostics);
+    expect(report.projects[0]).toMatchObject({
+      packageRoot: "/virtual",
+      framework: "vite",
+      analyzedFiles: [],
+      analyzedFileCount: 0,
+      complete: false,
+    });
+    expect(report.diagnostics[0]).toMatchObject({
+      id: expect.stringMatching(/^src\/App\.tsx::7:1::react\/no-danger::[a-f0-9]{64}$/),
+      normalizedFilePath: "src/App.tsx",
+      filePath: "/virtual/src/App.tsx",
+      tags: [],
+    });
     expect(report.summary).toMatchObject({
       errorCount: 0,
       warningCount: 1,
@@ -75,5 +91,30 @@ describe("toJsonReport (Node API helper)", () => {
     expect(() => toJsonReport(buildDiagnoseResult(), { version: "" })).not.toThrow();
     const report = toJsonReport(buildDiagnoseResult(), { version: "9.9.9" });
     expect(report.version).toBe("9.9.9");
+  });
+
+  it("preserves test ownership in raw JSON output", () => {
+    const result = buildDiagnoseResult();
+    result.diagnostics = [
+      {
+        ...result.diagnostics[0],
+        filePath:
+          "/virtual/packages/docusaurus-theme-classic/src/theme/Tabs/__tests__/index.test.tsx",
+        plugin: "react-compiler",
+        rule: "globals",
+        fileContext: "test",
+      },
+    ];
+
+    const report = toJsonReport(result, { version: "1.2.3" });
+
+    expect(report.diagnostics).toHaveLength(1);
+    expect(report.diagnostics[0]).toMatchObject({
+      filePath:
+        "/virtual/packages/docusaurus-theme-classic/src/theme/Tabs/__tests__/index.test.tsx",
+      fileContext: "test",
+      plugin: "react-compiler",
+      rule: "globals",
+    });
   });
 });

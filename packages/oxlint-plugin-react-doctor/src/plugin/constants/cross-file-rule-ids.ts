@@ -1,28 +1,85 @@
+import { INK_RULE_IDS } from "./ink.js";
+
 // Rules whose verdict for a file can depend on the content of OTHER files at
 // lint time. The per-file lint cache (`@react-doctor/core`'s `file-lint-cache`)
 // keys cached diagnostics on a single file's own content, so it would serve
 // STALE results for these rules when a dependency file changes. They are
-// therefore run in an always-fresh "sidecar" pass that is never cached.
+// therefore run in a separate "sidecar" pass whose caching is guarded by
+// per-file dependency fingerprints (`cross-file-dependencies.ts`) rather than
+// content alone — a rule here without a dependency collector re-lints every
+// file on every scan.
 //
-// Two flavors live here, both safe to keep always-fresh:
+// Two flavors live here:
 //   - Source-file readers — resolve imports / walk ancestor layouts and read
-//     OTHER source files (`no-barrel-import`, the two `nextjs-*` rules,
+//     OTHER source files (`no-barrel-import`, the `nextjs-*` rules,
 //     `no-mutating-reducer-state`, and `rn-no-raw-text`, which resolves an
 //     imported component to see whether it forwards its children into a
-//     `<Text>` or a non-text host). These MUST stay uncached.
-//   - Project-config readers — `rn-prefer-expo-image` classifies the owning
-//     package by reading the nearest `package.json`. That input is not folded
-//     into the ruleset hash, so it is carved here too (conservative, and only
-//     active on React Native / Expo projects).
+//     `<Text>` or a non-text host).
+//   - Project-config readers — these classify the owning package by reading
+//     the nearest `package.json`. That input is not folded into the ruleset
+//     hash, so they are carved here too. `rn-prefer-expo-image` reads the
+//     package-platform classification; `no-dynamic-import-path` and
+//     `no-full-lodash-import` read the manifest's `bin` field
+//     (`is-inside-node-cli-package.ts`); `prefer-dynamic-import` reads the
+//     publishable-library shape (`is-published-library-package.ts`);
+//     `no-indeterminate-attribute`, `rendering-hydration-mismatch-time`,
+//     `no-locale-format-in-render`, and `no-match-media-in-state-initializer`
+//     read the package-platform classification to skip React Native files;
+//     every React Router rule reads the nearest manifest to gate itself by
+//     the installed package version and Framework/Data/Declarative mode;
+//     `rn-no-legacy-shadow-styles` and `rn-style-prefer-boxshadow` read the
+//     manifest's react-native version plus `android/gradle.properties` and
+//     static Expo app configs (`is-legacy-arch-react-native-file.ts`) to stay
+//     silent on legacy-architecture apps where `boxShadow` is unsupported.
 //
-// `cross-file-rules.test.ts` reproduces the transitive import-graph analysis
-// and fails if a rule reaching a cross-file primitive is missing from this set —
-// turning a future silent staleness bug into a failing test.
+// `cross-file-rule-ids.test.ts` reproduces the transitive import-graph
+// analysis and fails if a rule reaching a cross-file primitive is missing from
+// this set — turning a future silent staleness bug into a failing test. It
+// also forces every rule here into the bounded/unbounded classification in
+// `cross-file-dependencies.ts`.
+import { REACT_ROUTER_RULE_IDS } from "./react-router.js";
+
 export const CROSS_FILE_RULE_IDS: ReadonlySet<string> = new Set([
+  ...INK_RULE_IDS,
+  "client-passive-event-listeners",
+  "exhaustive-deps",
   "no-barrel-import",
+  "nextjs-async-dynamic-api-not-awaited",
   "nextjs-missing-metadata",
+  "nextjs-no-img-element",
   "nextjs-no-use-search-params-without-suspense",
+  "no-dynamic-import-path",
+  "no-full-lodash-import",
+  "no-hydration-branch-on-browser-global",
+  "no-indeterminate-attribute",
+  "no-loading-flag-reset-outside-finally",
+  "no-locale-format-in-render",
+  "no-match-media-in-state-initializer",
+  "no-create-ref-in-function-component",
+  "no-adjust-state-on-prop-change",
+  "no-derived-state",
+  "no-derived-state-effect",
+  "no-event-handler",
+  "no-effect-with-fresh-deps",
+  "no-initialize-state",
   "no-mutating-reducer-state",
+  "only-export-components",
+  "no-unguarded-browser-global-at-module-scope",
+  "no-unguarded-browser-global-in-render-or-hook-init",
+  "window-open-without-noopener",
+  "prefer-dynamic-import",
+  "rendering-hydration-mismatch-time",
+  "remotion-calculate-metadata-fetch-signal",
+  "remotion-deterministic-randomness",
+  "remotion-no-css-animation",
+  "remotion-no-css-transition",
+  "remotion-no-css-url-assets",
+  "remotion-no-native-media-elements",
+  "remotion-no-next-image",
+  "rerender-memo-with-default-value",
+  "rn-no-legacy-shadow-styles",
   "rn-no-raw-text",
   "rn-prefer-expo-image",
+  "rn-style-prefer-boxshadow",
+  ...REACT_ROUTER_RULE_IDS,
 ]);

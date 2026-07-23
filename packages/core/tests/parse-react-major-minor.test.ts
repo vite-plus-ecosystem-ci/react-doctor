@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { isReactAtLeast, parseReactMajorMinor } from "@react-doctor/core";
+import { parseReactMajorMinor } from "@react-doctor/core";
 
 describe("parseReactMajorMinor", () => {
   it("extracts major.minor from caret/tilde/exact ranges", () => {
@@ -31,43 +31,20 @@ describe("parseReactMajorMinor", () => {
     expect(parseReactMajorMinor("<19.2-beta >=19.0")).toEqual({ major: 19, minor: 0 });
   });
 
-  it("returns null for tags, workspace protocols, and empty input", () => {
+  it("returns null for tags, unresolved sources, and empty input", () => {
     expect(parseReactMajorMinor(null)).toBeNull();
     expect(parseReactMajorMinor(undefined)).toBeNull();
     expect(parseReactMajorMinor("")).toBeNull();
     expect(parseReactMajorMinor("   ")).toBeNull();
+    expect(parseReactMajorMinor("catalog:react19")).toBeNull();
+    expect(parseReactMajorMinor("workspace:~19.2.0")).toBeNull();
+    expect(parseReactMajorMinor("git+https://github.com/acme/react.git#v19.2.0")).toBeNull();
+    expect(parseReactMajorMinor("acme/react#v19.2.0")).toBeNull();
   });
 
   it("ignores leading whitespace and npm: alias prefixes", () => {
     expect(parseReactMajorMinor("  ^19.2.0  ")).toEqual({ major: 19, minor: 2 });
     expect(parseReactMajorMinor("npm:react@^19.2.0")).toEqual({ major: 19, minor: 2 });
-  });
-});
-
-describe("isReactAtLeast", () => {
-  it("returns true when detected major is greater than required", () => {
-    expect(isReactAtLeast({ major: 20, minor: 0 }, { major: 19, minor: 2 })).toBe(true);
-  });
-
-  it("returns true when major matches and detected minor >= required", () => {
-    expect(isReactAtLeast({ major: 19, minor: 2 }, { major: 19, minor: 2 })).toBe(true);
-    expect(isReactAtLeast({ major: 19, minor: 5 }, { major: 19, minor: 2 })).toBe(true);
-  });
-
-  it("returns false when major matches but detected minor < required", () => {
-    expect(isReactAtLeast({ major: 19, minor: 0 }, { major: 19, minor: 2 })).toBe(false);
-    expect(isReactAtLeast({ major: 19, minor: 1 }, { major: 19, minor: 2 })).toBe(false);
-  });
-
-  it("returns false when detected major is less than required", () => {
-    expect(isReactAtLeast({ major: 18, minor: 99 }, { major: 19, minor: 2 })).toBe(false);
-  });
-
-  it("optimistically returns true when detection failed (null detected)", () => {
-    // Matches the Tailwind precedent: unparseable specs (workspace
-    // protocols, dist-tags) shouldn't silently drop version-gated
-    // rules. Callers are expected to gate on a separate "detected at
-    // all" check (e.g. `reactMajor !== null`) before relying on this.
-    expect(isReactAtLeast(null, { major: 19, minor: 2 })).toBe(true);
+    expect(parseReactMajorMinor("npm:react-v18@^19.2.0")).toEqual({ major: 19, minor: 2 });
   });
 });

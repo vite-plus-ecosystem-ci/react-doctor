@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, memo } from "react";
+import { motion } from "framer-motion";
 
 const MemoChild = memo(({ onClick }: { onClick: () => void }) => (
   <button onClick={onClick}>click</button>
@@ -11,22 +12,30 @@ const SimpleMemoComponent = ({ count }: { count: number }) => {
   return <div>{doubled}</div>;
 };
 
-const LayoutAnimationComponent = () => <div animate={{ width: 100, height: 200 }}>animated</div>;
+const LayoutAnimationComponent = () => (
+  <motion.div animate={{ width: 100, height: 200 }}>animated</motion.div>
+);
 
 const TransitionAllComponent = () => <div style={{ transition: "all 0.3s ease" }}>styled</div>;
 
-const LargeBlurComponent = () => <div style={{ filter: "blur(20px)" }}>blurred</div>;
+const LargeBlurComponent = () => (
+  <motion.div animate={{ filter: "blur(20px)" }}>blurred</motion.div>
+);
 
-const ScaleFromZeroComponent = () => <div initial={{ scale: 0 }}>scale</div>;
+const ScaleFromZeroComponent = () => <motion.div initial={{ scale: 0 }}>scale</motion.div>;
 
 const PermanentWillChangeComponent = () => <div style={{ willChange: "transform" }}>permanent</div>;
 
-const DefaultPropComponent = ({ items = [] }: { items?: string[] }) => (
+const MemoItemList = memo(({ items }: { items: string[] }) => (
   <ul>
     {items.map((item) => (
       <li key={item}>{item}</li>
     ))}
   </ul>
+));
+
+const DefaultPropComponent = ({ items = [] }: { items?: string[] }) => (
+  <MemoItemList items={items} />
 );
 
 const SvgAnimationComponent = () => (

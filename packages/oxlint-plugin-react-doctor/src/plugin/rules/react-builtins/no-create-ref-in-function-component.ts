@@ -1,14 +1,96 @@
 import { componentOrHookDisplayNameForFunction } from "../../utils/component-or-hook-display-name.js";
 import { defineRule } from "../../utils/define-rule.js";
 import { findEnclosingFunction } from "../../utils/find-enclosing-function.js";
+import { findTransparentExpressionRoot } from "../../utils/find-transparent-expression-root.js";
 import { functionContainsReactRenderOutput } from "../../utils/function-contains-react-render-output.js";
+import { getFunctionBindingIdentifier } from "../../utils/get-function-binding-name.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
-import { isReactFunctionCall } from "../../utils/is-react-function-call.js";
+import { isReactApiCall } from "../../utils/is-react-api-call.js";
 import { isReactHookName } from "../../utils/is-react-hook-name.js";
+import { isCreateRefResultWriteOnly } from "./is-create-ref-result-write-only.js";
+import { isProvenOneShotTestingLibraryComponent } from "./is-proven-one-shot-testing-library-component.js";
+import type { ScopeAnalysis } from "../../semantic/scope-analysis.js";
+import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 
 const MESSAGE =
-  "`createRef()` in a function component allocates a brand-new ref on every render, so it never holds a value between renders. Use the `useRef()` hook instead.";
+  "`createRef()` may escape or be observed beyond the render that created it, so a later render can replace the ref object and detach the observed one. Hoist a `useRef()` call to the component's unconditional top level instead.";
+
+// `useMemo(() => createRef(), [])` runs its callback during the enclosing
+// component/hook's render, so the memo callback is transparent when
+// resolving where the createRef really lives — the fix is still `useRef`.
+const isUseMemoCallbackArgument = (functionNode: EsTreeNode, scopes: ScopeAnalysis): boolean => {
+  const parent = functionNode.parent;
+  if (!parent || !isNodeOfType(parent, "CallExpression")) return false;
+  if (parent.arguments?.[0] !== functionNode) return false;
+  return isReactApiCall(parent, "useMemo", scopes, { resolveNamedAliases: true });
+};
+
+const findEnclosingRenderFunction = (
+  node: EsTreeNode,
+  scopes: ScopeAnalysis,
+): EsTreeNode | null => {
+  let enclosingFunction = findEnclosingFunction(node);
+  while (enclosingFunction && isUseMemoCallbackArgument(enclosingFunction, scopes)) {
+    enclosingFunction = findEnclosingFunction(enclosingFunction);
+  }
+  return enclosingFunction;
+};
+
+const isReactUseStateInitialState = (node: EsTreeNode, scopes: ScopeAnalysis): boolean => {
+  const initialState = findTransparentExpressionRoot(node);
+  const stateCall = initialState.parent;
+  return Boolean(
+    stateCall &&
+    isNodeOfType(stateCall, "CallExpression") &&
+    stateCall.arguments[0] === initialState &&
+    isReactApiCall(stateCall, "useState", scopes, {
+      allowGlobalReactNamespace: true,
+      resolveNamedAliases: true,
+    }),
+  );
+};
+
+const hasDirectExportWrapper = (declarationNode: EsTreeNode): boolean => {
+  const parent = declarationNode.parent;
+  if (
+    isNodeOfType(parent, "ExportNamedDeclaration") ||
+    isNodeOfType(parent, "ExportDefaultDeclaration")
+  ) {
+    return true;
+  }
+  return Boolean(
+    isNodeOfType(declarationNode, "VariableDeclarator") &&
+    (isNodeOfType(parent?.parent, "ExportNamedDeclaration") ||
+      isNodeOfType(parent?.parent, "ExportDefaultDeclaration")),
+  );
+};
+
+const isFunctionExclusivelyUsedAsReactStateInitializer = (
+  functionNode: EsTreeNode,
+  scopes: ScopeAnalysis,
+): boolean => {
+  if (isReactUseStateInitialState(functionNode, scopes)) return true;
+  const bindingIdentifier = getFunctionBindingIdentifier(
+    findTransparentExpressionRoot(functionNode),
+  );
+  if (!bindingIdentifier) return false;
+  const bindingSymbol = isNodeOfType(functionNode, "FunctionDeclaration")
+    ? scopes.scopeFor(functionNode).symbolsByName.get(bindingIdentifier.name)
+    : scopes.symbolFor(bindingIdentifier);
+  if (
+    !bindingSymbol ||
+    (bindingSymbol.kind !== "const" && bindingSymbol.kind !== "function") ||
+    hasDirectExportWrapper(bindingSymbol.declarationNode) ||
+    bindingSymbol.references.length === 0
+  ) {
+    return false;
+  }
+  return bindingSymbol.references.every(
+    (reference) =>
+      reference.flag === "read" && isReactUseStateInitialState(reference.identifier, scopes),
+  );
+};
 
 // `createRef` is the class-component ref API. Inside a function component or a
 // custom hook it produces a fresh ref each render (no persistence) — almost
@@ -26,17 +108,17 @@ export const noCreateRefInFunctionComponent = defineRule({
     "Replace `createRef()` with the `useRef()` hook inside function components and hooks. `createRef` is only for class components.",
   create: (context) => ({
     CallExpression(node: EsTreeNodeOfType<"CallExpression">) {
-      if (!isReactFunctionCall(node, "createRef")) return;
-
-      // Guard the bare `createRef()` form against a shadowing local binding
-      // (`const createRef = () => ({})`). If the identifier resolves to a
-      // non-import declaration it isn't React's `createRef`, so skip.
-      if (isNodeOfType(node.callee, "Identifier")) {
-        const symbol = context.scopes.symbolFor(node.callee);
-        if (symbol && symbol.kind !== "import") return;
+      if (
+        !isReactApiCall(node, "createRef", context.scopes, {
+          allowGlobalReactNamespace: true,
+          allowUnboundBareCalls: true,
+          resolveNamedAliases: true,
+        })
+      ) {
+        return;
       }
 
-      const enclosingFunction = findEnclosingFunction(node);
+      const enclosingFunction = findEnclosingRenderFunction(node, context.scopes);
       if (!enclosingFunction) return;
       const displayName = componentOrHookDisplayNameForFunction(enclosingFunction);
       if (!displayName) return;
@@ -45,8 +127,20 @@ export const noCreateRefInFunctionComponent = defineRule({
       // count as a component (filters PascalCase factories).
       const isComponentOrHook =
         isReactHookName(displayName) ||
-        functionContainsReactRenderOutput(enclosingFunction, context.scopes);
+        functionContainsReactRenderOutput(enclosingFunction, context.scopes, context.cfg);
       if (!isComponentOrHook) return;
+      if (
+        isReactUseStateInitialState(node, context.scopes) ||
+        isFunctionExclusivelyUsedAsReactStateInitializer(enclosingFunction, context.scopes)
+      ) {
+        return;
+      }
+      if (
+        isProvenOneShotTestingLibraryComponent(enclosingFunction, context.filename, context.scopes)
+      ) {
+        return;
+      }
+      if (isCreateRefResultWriteOnly(node, context.filename, context.scopes)) return;
 
       context.report({ node, message: MESSAGE });
     },

@@ -57,6 +57,7 @@ export {
   filterSourceFiles,
   summarizeDiagnostics,
   defineConfig,
+  hasReactRuntime,
 } from "@react-doctor/core";
 export { buildJsonReport, buildJsonReportError };
 // `ReactDoctorError` is the tagged Schema class from
@@ -114,6 +115,10 @@ export const toJsonReport = (result: DiagnoseResult, options: ToJsonReportOption
           skippedChecks: result.skippedChecks,
           ...(result.skippedCheckReasons
             ? { skippedCheckReasons: result.skippedCheckReasons }
+            : {}),
+          ...(result.analyzedFiles ? { analyzedFiles: result.analyzedFiles } : {}),
+          ...(typeof result.scannedFileCount === "number"
+            ? { scannedFileCount: result.scannedFileCount }
             : {}),
           project: result.project,
           elapsedMilliseconds: result.elapsedMilliseconds,

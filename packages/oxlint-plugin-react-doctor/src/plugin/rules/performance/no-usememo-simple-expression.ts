@@ -1,12 +1,15 @@
+import { MUTATING_ARRAY_METHODS } from "../../constants/js.js";
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { isImportedFromModule } from "../../utils/find-import-source-for-name.js";
+import { findTransparentExpressionRoot } from "../../utils/find-transparent-expression-root.js";
 import { isCanonicalReactNamespaceName } from "../../utils/is-canonical-react-namespace-name.js";
 import { isHookCall } from "../../utils/is-hook-call.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import type { RuleContext } from "../../utils/rule-context.js";
+import type { ScopeAnalysis } from "../../semantic/scope-analysis.js";
 
 const isSimpleExpression = (node: EsTreeNode | null): boolean => {
   if (!node) return false;
@@ -48,6 +51,91 @@ const isTriviallyCheapExpression = (node: EsTreeNode | null): boolean => {
   if (isNodeOfType(innerExpression, "Identifier")) return false;
   if (isNodeOfType(innerExpression, "MemberExpression")) return false;
   return true;
+};
+
+// A flat array/object literal whose parts are all simple reads —
+// `[x]`, `{ a, b }`. Rebuilding one costs a few nanoseconds, so the
+// memo only pays for itself when the RESULT'S IDENTITY is consumed
+// (dep / prop / escaping value). Spreads, computed keys, and nested
+// containers are excluded.
+const isTrivialContainerLiteral = (node: EsTreeNode | null): boolean => {
+  if (!node) return false;
+  const innerExpression = stripParenExpression(node);
+  if (isNodeOfType(innerExpression, "ArrayExpression")) {
+    return (innerExpression.elements ?? []).every(
+      (element) => element !== null && isSimpleExpression(element),
+    );
+  }
+  if (isNodeOfType(innerExpression, "ObjectExpression")) {
+    return (innerExpression.properties ?? []).every(
+      (property) =>
+        isNodeOfType(property, "Property") &&
+        !property.computed &&
+        isSimpleExpression(property.value),
+    );
+  }
+  return false;
+};
+
+// True when the reference can never leak the container's identity —
+// it's only read THROUGH (`value.length`, `value.map(...)`, `value[0]`).
+// TS wrappers (`value!.length`, `(value as string[]).length`) are
+// transparent. A mutation through the member (`value.push(x)`,
+// `value[0] = x`, `delete value.a`, `value.count++`) is NOT a plain
+// read: it makes the memo's cross-render persistence observable, so
+// rebuilding the literal inline would change behavior.
+const isNonEscapingRead = (identifier: EsTreeNode): boolean => {
+  const readRoot = findTransparentExpressionRoot(identifier);
+  const memberNode = readRoot.parent;
+  if (!isNodeOfType(memberNode, "MemberExpression") || memberNode.object !== readRoot) {
+    return false;
+  }
+  const memberUse = findTransparentExpressionRoot(memberNode);
+  const memberUseParent = memberUse.parent;
+  if (isNodeOfType(memberUseParent, "AssignmentExpression") && memberUseParent.left === memberUse) {
+    return false;
+  }
+  if (isNodeOfType(memberUseParent, "UpdateExpression")) return false;
+  if (isNodeOfType(memberUseParent, "UnaryExpression") && memberUseParent.operator === "delete") {
+    return false;
+  }
+  const isMutatingMethodCall =
+    isNodeOfType(memberUseParent, "CallExpression") &&
+    memberUseParent.callee === memberUse &&
+    !memberNode.computed &&
+    isNodeOfType(memberNode.property, "Identifier") &&
+    MUTATING_ARRAY_METHODS.has(memberNode.property.name);
+  return !isMutatingMethodCall;
+};
+
+// Decide whether the memoized container's referential identity is ever
+// consumed. Fires only in provably identity-free shapes:
+//   - the result is discarded (`useMemo(...)` in statement position),
+//   - the result is immediately destructured (container identity gone),
+//   - every read of the result binding stays behind a member access.
+// Anything else — passed as a prop, listed in deps, returned, spread —
+// might rely on the stable reference, which is the legitimate use of
+// memoizing a fresh container.
+const isMemoIdentityUnused = (
+  memoCallNode: EsTreeNodeOfType<"CallExpression">,
+  scopes: ScopeAnalysis,
+): boolean => {
+  const memoUsageRoot = findTransparentExpressionRoot(memoCallNode);
+  const parentNode = memoUsageRoot.parent;
+  if (isNodeOfType(parentNode, "ExpressionStatement")) return true;
+  if (!isNodeOfType(parentNode, "VariableDeclarator") || parentNode.init !== memoUsageRoot) {
+    return false;
+  }
+  const bindingTarget = parentNode.id;
+  if (isNodeOfType(bindingTarget, "ArrayPattern") || isNodeOfType(bindingTarget, "ObjectPattern")) {
+    return true;
+  }
+  if (!isNodeOfType(bindingTarget, "Identifier")) return false;
+  const symbol = scopes.symbolFor(bindingTarget);
+  if (!symbol) return false;
+  return symbol.references.every(
+    (reference) => reference.flag === "read" && isNonEscapingRead(reference.identifier),
+  );
 };
 
 export const noUsememoSimpleExpression = defineRule({
@@ -98,11 +186,25 @@ export const noUsememoSimpleExpression = defineRule({
         returnExpression = callback.body.body[0].argument;
       }
 
-      if (returnExpression && isTriviallyCheapExpression(returnExpression)) {
+      if (!returnExpression) return;
+
+      if (isTriviallyCheapExpression(returnExpression)) {
         context.report({
           node,
           message:
             "This costs more than it saves because useMemo is wrapping a value that's already cheap, so remove the useMemo",
+        });
+        return;
+      }
+
+      if (
+        isTrivialContainerLiteral(returnExpression) &&
+        isMemoIdentityUnused(node, context.scopes)
+      ) {
+        context.report({
+          node,
+          message:
+            "This useMemo rebuilds a tiny literal whose reference is never relied on, so remove the useMemo and build the value inline",
         });
       }
     },

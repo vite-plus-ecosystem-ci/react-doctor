@@ -3,6 +3,10 @@ import { runRule } from "../../../test-utils/run-rule.js";
 import { noJsxElementType } from "./no-jsx-element-type.js";
 
 describe("no-jsx-element-type", () => {
+  it("ships at warn severity — a type-hygiene preference, not a runtime bug", () => {
+    expect(noJsxElementType.severity).toBe("warn");
+  });
+
   it("flags function declaration with JSX.Element return type", () => {
     const result = runRule(
       noJsxElementType,
@@ -83,6 +87,29 @@ describe("no-jsx-element-type", () => {
       noJsxElementType,
       `
       declare function App(props: { variant: "a" }): JSX.Element;
+    `,
+    );
+
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("flags an anonymous default-exported component", () => {
+    const result = runRule(
+      noJsxElementType,
+      `
+      export default (): JSX.Element => <main />;
+    `,
+    );
+
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("flags a component callback wrapped in memo", () => {
+    const result = runRule(
+      noJsxElementType,
+      `
+      import { memo } from "react";
+      const App = memo((): JSX.Element => <main />);
     `,
     );
 
@@ -206,6 +233,122 @@ describe("no-jsx-element-type", () => {
     );
 
     expect(result.diagnostics).toEqual([]);
+  });
+
+  it("does not flag a private renderer factory with a concrete element contract", () => {
+    const result = runRule(
+      noJsxElementType,
+      `
+      import React from "react";
+
+      const defaultRenderComponent = (
+        props: React.HTMLProps<HTMLInputElement>,
+      ): JSX.Element => <input {...props} />;
+
+      export const ReactTransliterate = ({
+        renderComponent = defaultRenderComponent,
+      }): JSX.Element => renderComponent({});
+    `,
+    );
+
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag lowercase renderer declarations and expressions", () => {
+    const result = runRule(
+      noJsxElementType,
+      `
+      function renderInput(): JSX.Element {
+        return <input />;
+      }
+
+      const renderButton = function (): JSX.Element {
+        return <button />;
+      };
+    `,
+    );
+
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("does not flag inline renderer callbacks", () => {
+    const result = runRule(
+      noJsxElementType,
+      `
+      registerRenderer((props): JSX.Element => <input {...props} />);
+
+      const renderers = {
+        input: (props): JSX.Element => <input {...props} />,
+      };
+    `,
+    );
+
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("does not flag method signatures that promise a concrete element", () => {
+    const result = runRule(
+      noJsxElementType,
+      `
+      interface Renderer {
+        renderInput(props: Record<string, unknown>): JSX.Element;
+      }
+    `,
+    );
+
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("does not flag JSX.Element when JSX is imported from solid-js", () => {
+    const result = runRule(
+      noJsxElementType,
+      `
+      import type { JSX } from "solid-js";
+      const App = (): JSX.Element => <div />;
+    `,
+    );
+
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("does not flag JSX.Element when JSX is imported from preact", () => {
+    const result = runRule(
+      noJsxElementType,
+      `
+      import { JSX } from "preact";
+      function App(): JSX.Element {
+        return <div />;
+      }
+    `,
+    );
+
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("does not flag JSX.Element when JSX is imported from react (React 19 style)", () => {
+    const result = runRule(
+      noJsxElementType,
+      `
+      import type { JSX } from "react";
+      function App(): JSX.Element {
+        return <div />;
+      }
+    `,
+    );
+
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("still flags JSX.Element when the import binds something other than JSX", () => {
+    const result = runRule(
+      noJsxElementType,
+      `
+      import type { FC } from "react";
+      const App = (): JSX.Element => <div />;
+    `,
+    );
+
+    expect(result.diagnostics).toHaveLength(1);
   });
 
   it("still flags JSX.Element even with a shadowed local JSX namespace", () => {

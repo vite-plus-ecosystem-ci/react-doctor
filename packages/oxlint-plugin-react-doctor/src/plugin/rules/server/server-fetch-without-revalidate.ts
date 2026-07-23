@@ -3,14 +3,80 @@ import { isInProjectDirectory } from "../../utils/is-in-project-directory.js";
 import { normalizeFilename } from "../../utils/normalize-filename.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { RuleContext } from "../../utils/rule-context.js";
+import { isTypeOnlyImport } from "../../utils/is-type-only-import.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { isMutatingFetchCall } from "../../utils/find-side-effect.js";
+import { getStaticPropertyKeyName } from "../../utils/get-static-property-key-name.js";
+import { getStaticPropertyName } from "../../utils/get-static-property-name.js";
 import { NEXTJS_SOURCE_FILE_EXTENSION_GROUP } from "../../constants/nextjs.js";
+import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 
-const isFetchCall = (node: EsTreeNode): boolean => {
+const isGlobalThisFetchMember = (node: EsTreeNode, context: RuleContext): boolean => {
+  const memberExpression = stripParenExpression(node);
+  if (!isNodeOfType(memberExpression, "MemberExpression")) return false;
+  const receiver = stripParenExpression(memberExpression.object);
+  return (
+    getStaticPropertyName(memberExpression) === "fetch" &&
+    isNodeOfType(receiver, "Identifier") &&
+    receiver.name === "globalThis" &&
+    context.scopes.isGlobalReference(receiver)
+  );
+};
+
+const isGlobalThisIdentifier = (node: EsTreeNode, context: RuleContext): boolean => {
+  const expression = stripParenExpression(node);
+  return (
+    isNodeOfType(expression, "Identifier") &&
+    expression.name === "globalThis" &&
+    context.scopes.isGlobalReference(expression)
+  );
+};
+
+const isGlobalFetchDestructuringBinding = (
+  symbolBinding: EsTreeNode,
+  declaration: EsTreeNodeOfType<"VariableDeclarator">,
+  context: RuleContext,
+): boolean =>
+  isNodeOfType(declaration.id, "ObjectPattern") &&
+  Boolean(
+    declaration.id.properties.some(
+      (property) =>
+        isNodeOfType(property, "Property") &&
+        property.value === symbolBinding &&
+        getStaticPropertyKeyName(property, { allowComputedString: true }) === "fetch",
+    ) &&
+    declaration.init &&
+    isGlobalThisIdentifier(declaration.init, context),
+  );
+
+const isExactGlobalFetchValue = (
+  node: EsTreeNode,
+  context: RuleContext,
+  visitedSymbolIds: Set<number> = new Set(),
+): boolean => {
+  const expression = stripParenExpression(node);
+  if (isGlobalThisFetchMember(expression, context)) return true;
+  if (!isNodeOfType(expression, "Identifier")) return false;
+  if (expression.name === "fetch" && context.scopes.isGlobalReference(expression)) return true;
+  const symbol = context.scopes.symbolFor(expression);
+  if (!symbol || symbol.kind !== "const" || visitedSymbolIds.has(symbol.id)) return false;
+  if (!isNodeOfType(symbol.declarationNode, "VariableDeclarator")) return false;
+  if (
+    isGlobalFetchDestructuringBinding(symbol.bindingIdentifier, symbol.declarationNode, context)
+  ) {
+    return true;
+  }
+  if (symbol.declarationNode.id !== symbol.bindingIdentifier || !symbol.initializer) return false;
+  visitedSymbolIds.add(symbol.id);
+  return isExactGlobalFetchValue(symbol.initializer, context, visitedSymbolIds);
+};
+
+const isFetchCall = (node: EsTreeNode, context: RuleContext): boolean => {
   if (!isNodeOfType(node, "CallExpression")) return false;
-  return isNodeOfType(node.callee, "Identifier") && node.callee.name === "fetch";
+  const callee = stripParenExpression(node.callee);
+  if (!isNodeOfType(callee, "Identifier") || callee.name !== "fetch") return false;
+  return isExactGlobalFetchValue(callee, context);
 };
 
 const getPropertyKeyName = (property: EsTreeNode): string | null => {
@@ -41,7 +107,7 @@ const objectExpressionHasSpread = (
 // `cache: "no-store"` for fully dynamic data, or `next: { tags: [..., "test-noise"] }`
 // for tag-based invalidation). Forgetting this is a common silent-stale
 // data bug. Next.js 15+ changed the default to `no-store`, so the rule
-// is gated with `disabledBy: ["nextjs:15"]`.
+// is gated with `disabledWhen: ["nextjs:15"]`.
 //
 // Heuristic: `fetch(url)` in an App Router file (`app/.../route.*`,
 // `app/.../page.*`, `app/.../layout.*`) without a config object —
@@ -60,11 +126,40 @@ const APP_ROUTER_FILE_PATTERN = new RegExp(
 
 const NON_PROJECT_PATH_PATTERN = /\/(?:node_modules|dist|build|\.next)\//;
 
+// Remix / React Router also use an `app/` directory with `route.tsx`
+// files, but their `fetch` has standard browser/undici semantics — the
+// Next.js data-cache never applies there.
+const REMIX_IMPORT_SOURCE_PATTERN = /^(?:@remix-run\/|@react-router\/|react-router(?:-dom)?$)/;
+
+const programImportsRemixRouter = (programNode: EsTreeNodeOfType<"Program">): boolean =>
+  (programNode.body ?? []).some(
+    (statement) =>
+      isNodeOfType(statement, "ImportDeclaration") &&
+      !isTypeOnlyImport(statement) &&
+      typeof statement.source?.value === "string" &&
+      REMIX_IMPORT_SOURCE_PATTERN.test(statement.source.value),
+  );
+
+// `fetch(new URL("./font.ttf", import.meta.url))` is the documented
+// `next/og` pattern for loading a bundled static asset — caching it
+// forever is the intended behavior, so "stale data" never applies.
+const isImportMetaUrlAssetArgument = (urlArg: EsTreeNode | undefined): boolean => {
+  if (!isNodeOfType(urlArg, "NewExpression")) return false;
+  if (!isNodeOfType(urlArg.callee, "Identifier") || urlArg.callee.name !== "URL") return false;
+  const baseArg = urlArg.arguments?.[1];
+  return (
+    isNodeOfType(baseArg, "MemberExpression") &&
+    isNodeOfType(baseArg.object, "MetaProperty") &&
+    isNodeOfType(baseArg.property, "Identifier") &&
+    baseArg.property.name === "url"
+  );
+};
+
 export const serverFetchWithoutRevalidate = defineRule({
   id: "server-fetch-without-revalidate",
   title: "Fetch without revalidate",
   severity: "warn",
-  disabledBy: ["nextjs:15"],
+  disabledWhen: ["nextjs:15", "nextjs:static-export"],
   recommendation:
     'Pass `{ next: { revalidate: <seconds> } }` (or `cache: "no-store"`) so old data doesn\'t stick around.',
   create: (context: RuleContext) => {
@@ -87,11 +182,11 @@ export const serverFetchWithoutRevalidate = defineRule({
             isNodeOfType(statement.expression, "Literal") &&
             statement.expression.value === "use client",
         );
-        isServerSideFile = !hasUseClient;
+        isServerSideFile = !hasUseClient && !programImportsRemixRouter(node);
       },
       CallExpression(node: EsTreeNodeOfType<"CallExpression">) {
         if (!isServerSideFile) return;
-        if (!isFetchCall(node)) return;
+        if (!isFetchCall(node, context)) return;
         // Next.js only caches GET requests, so a mutating fetch
         // (POST/PUT/PATCH/DELETE) can never serve stale cached data.
         if (isMutatingFetchCall(node)) return;
@@ -112,6 +207,7 @@ export const serverFetchWithoutRevalidate = defineRule({
         }
 
         const urlArg = node.arguments?.[0];
+        if (isImportMetaUrlAssetArgument(urlArg)) return;
         const urlText =
           isNodeOfType(urlArg, "Literal") && typeof urlArg.value === "string"
             ? `"${urlArg.value}"`

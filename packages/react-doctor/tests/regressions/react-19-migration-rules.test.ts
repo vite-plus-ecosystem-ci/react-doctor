@@ -87,6 +87,53 @@ void hydrateRoot;
   });
 });
 
+describe("no-ref-callback-cleanup-before-react-19", () => {
+  const source = `
+    export const Component = ({ release }) => (
+      <div ref={(node) => {
+        if (!node) return;
+        return () => release(node);
+      }} />
+    );
+  `;
+
+  it("reports when the supported React range includes 18", async () => {
+    const projectDir = setupReactProject(tempRoot, "ref-cleanup-react-18-range", {
+      reactVersion: "^18.1.0 || ^19.0.0",
+      files: { "src/component.tsx": source },
+    });
+
+    const hits = await collectRuleHits(projectDir, "no-ref-callback-cleanup-before-react-19", {
+      reactMajorVersion: 18,
+    });
+    expect(hits).toHaveLength(1);
+  });
+
+  it("stays silent for React 19-only projects", async () => {
+    const projectDir = setupReactProject(tempRoot, "ref-cleanup-react-19", {
+      reactVersion: "^19.0.0",
+      files: { "src/component.tsx": source },
+    });
+
+    const hits = await collectRuleHits(projectDir, "no-ref-callback-cleanup-before-react-19", {
+      reactMajorVersion: 19,
+    });
+    expect(hits).toEqual([]);
+  });
+
+  it("stays silent outside the narrow React 18 compatibility gate", async () => {
+    const projectDir = setupReactProject(tempRoot, "ref-cleanup-react-17", {
+      reactVersion: "^17.0.0",
+      files: { "src/component.tsx": source },
+    });
+
+    const hits = await collectRuleHits(projectDir, "no-ref-callback-cleanup-before-react-19", {
+      reactMajorVersion: 17,
+    });
+    expect(hits).toEqual([]);
+  });
+});
+
 describe("no-legacy-class-lifecycles", () => {
   it("flags componentWillMount / componentWillReceiveProps / componentWillUpdate", async () => {
     const projectDir = setupReactProject(tempRoot, "no-legacy-class-lifecycles-pos", {
@@ -498,15 +545,13 @@ export { config };
 });
 
 describe("version gating", () => {
-  it("does NOT flag forwardRef on React 18 projects (migration-hint, suppressed below minMajor)", async () => {
-    const projectDir = setupReactProject(tempRoot, "gating-r18-forwardRef", {
+  it("does NOT flag createFactory on React 18 projects (migration-hint, suppressed below minMajor)", async () => {
+    const projectDir = setupReactProject(tempRoot, "gating-r18-createFactory", {
       reactVersion: "^18.3.1",
       files: {
-        "src/Button.tsx": `import { forwardRef } from "react";
+        "src/legacy.tsx": `import React from "react";
 
-export const Button = forwardRef<HTMLButtonElement>((_props, ref) => (
-  <button ref={ref} />
-));
+export const createLegacyButton = React.createFactory("button");
 `,
       },
     });
@@ -517,15 +562,13 @@ export const Button = forwardRef<HTMLButtonElement>((_props, ref) => (
     expect(hits).toHaveLength(0);
   });
 
-  it("does NOT flag forwardRef on React 17 projects", async () => {
-    const projectDir = setupReactProject(tempRoot, "gating-r17-forwardRef", {
+  it("does NOT flag createFactory on React 17 projects", async () => {
+    const projectDir = setupReactProject(tempRoot, "gating-r17-createFactory", {
       reactVersion: "^17.0.2",
       files: {
-        "src/Button.tsx": `import { forwardRef } from "react";
+        "src/legacy.tsx": `import React from "react";
 
-export const Button = forwardRef<HTMLButtonElement>((_props, ref) => (
-  <button ref={ref} />
-));
+export const createLegacyButton = React.createFactory("button");
 `,
       },
     });
@@ -536,14 +579,16 @@ export const Button = forwardRef<HTMLButtonElement>((_props, ref) => (
     expect(hits).toHaveLength(0);
   });
 
-  it("DOES flag forwardRef on React 19 projects", async () => {
-    const projectDir = setupReactProject(tempRoot, "gating-r19-forwardRef", {
+  it("accepts forwardRef and flags createFactory on React 19 projects", async () => {
+    const projectDir = setupReactProject(tempRoot, "gating-r19-react-apis", {
       files: {
-        "src/Button.tsx": `import { forwardRef } from "react";
+        "src/Button.tsx": `import React, { forwardRef } from "react";
 
 export const Button = forwardRef<HTMLButtonElement>((_props, ref) => (
   <button ref={ref} />
 ));
+
+export const createLegacyButton = React.createFactory("button");
 `,
       },
     });
@@ -551,18 +596,18 @@ export const Button = forwardRef<HTMLButtonElement>((_props, ref) => (
     const hits = await collectRuleHits(projectDir, "no-react19-deprecated-apis", {
       reactMajorVersion: 19,
     });
-    expect(hits.length).toBeGreaterThanOrEqual(1);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]?.message).toContain("createFactory");
+    expect(hits[0]?.message).not.toContain("forwardRef");
   });
 
-  it("does NOT flag forwardRef when the React version is unknown", async () => {
-    const projectDir = setupReactProject(tempRoot, "gating-null-forwardRef", {
+  it("does NOT flag createFactory when the React version is unknown", async () => {
+    const projectDir = setupReactProject(tempRoot, "gating-null-createFactory", {
       reactVersion: "*",
       files: {
-        "src/Button.tsx": `import { forwardRef } from "react";
+        "src/legacy.tsx": `import React from "react";
 
-export const Button = forwardRef<HTMLButtonElement>((_props, ref) => (
-  <button ref={ref} />
-));
+export const createLegacyButton = React.createFactory("button");
 `,
       },
     });

@@ -102,6 +102,48 @@ describe("control-flow-graph", () => {
       ).toBe(true);
     });
 
+    it.each([
+      "while (true)",
+      "while (1)",
+      'while ("run")',
+      "while (1n)",
+      "while (!false)",
+      "for (;;)",
+    ])("%s enters its body before a reachable break", (loopHeader) => {
+      const analysis = analyze(`
+          function fn() {
+            ${loopHeader} {
+              beforeBreak();
+              break;
+            }
+            afterLoop();
+          }
+        `);
+      expect(
+        analysis.isUnconditionalFromEntry(findCalleeNode(analysis.program, "beforeBreak")!),
+      ).toBe(true);
+      expect(
+        analysis.isUnconditionalFromEntry(findCalleeNode(analysis.program, "afterLoop")!),
+      ).toBe(true);
+    });
+
+    it.each(["while (false)", "while (0)", 'while ("")'])("%s can skip its body", (loopHeader) => {
+      const analysis = analyze(`
+          function fn() {
+            ${loopHeader} {
+              inLoop();
+            }
+            afterLoop();
+          }
+        `);
+      expect(analysis.isUnconditionalFromEntry(findCalleeNode(analysis.program, "inLoop")!)).toBe(
+        false,
+      );
+      expect(
+        analysis.isUnconditionalFromEntry(findCalleeNode(analysis.program, "afterLoop")!),
+      ).toBe(true);
+    });
+
     it("for loop body is conditional", () => {
       const analysis = analyze(`
         function fn() {
@@ -188,6 +230,19 @@ describe("control-flow-graph", () => {
       ).toBe(true);
     });
 
+    it("builds a CFG on demand for a function in a default parameter", () => {
+      const analysis = analyze(`
+        function outer(callback = () => {
+          insideDefault();
+        }) {}
+      `);
+      const callNode = findCalleeNode(analysis.program, "insideDefault")!;
+      const owner = analysis.enclosingFunction(callNode)!;
+
+      expect(analysis.cfgFor(owner)).not.toBeNull();
+      expect(analysis.isUnconditionalFromEntry(callNode)).toBe(true);
+    });
+
     it("switch case body is conditional", () => {
       const analysis = analyze(`
         function fn(x) {
@@ -237,6 +292,18 @@ describe("control-flow-graph", () => {
       expect(cfg!.blocks.length).toBeGreaterThan(0);
       expect(cfg!.entry).toBeDefined();
       expect(cfg!.exit).toBeDefined();
+    });
+
+    it("skips host function declarations without bodies", () => {
+      const parsed = parseFixture("function declared() {}");
+      const programBody = (parsed.program as unknown as { body: EsTreeNode[] }).body;
+      const declaration = programBody[0];
+      Reflect.set(declaration, "body", null);
+      attachParentReferences(parsed.program);
+
+      const analysis = analyzeControlFlow(parsed.program);
+
+      expect(analysis.cfgFor(declaration)).toBeNull();
     });
   });
 });

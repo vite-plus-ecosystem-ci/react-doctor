@@ -1,14 +1,8 @@
-export type Framework =
-  | "nextjs"
-  | "vite"
-  | "cra"
-  | "remix"
-  | "gatsby"
-  | "expo"
-  | "react-native"
-  | "tanstack-start"
-  | "preact"
-  | "unknown";
+import type { FrameworkToken } from "oxlint-plugin-react-doctor";
+
+// Aliased to the plugin's capability vocabulary: `buildCapabilities` emits
+// `project.framework` as a capability token, so the two unions must be one.
+export type Framework = FrameworkToken;
 
 export interface ProjectInfo {
   rootDirectory: string;
@@ -19,10 +13,57 @@ export interface ProjectInfo {
   zodVersion: string | null;
   /** Parsed major from `zodVersion`, or `null` when absent/unparseable. Mirrors `reactMajorVersion`. */
   zodMajorVersion: number | null;
+  /** Declared MobX core version spec. Optional so existing `ProjectInfo` consumers remain source-compatible. */
+  mobxVersion?: string | null;
+  /** Parsed major from `mobxVersion`, or `null` when absent/unparseable. */
+  mobxMajorVersion?: number | null;
+  hasMobxReact?: boolean;
+  mobxReactVersion?: string | null;
+  hasMobxReactLite?: boolean;
+  mobxReactLiteVersion?: string | null;
+  hasMobxStateTree?: boolean;
+  hasMobxReactObserver?: boolean;
+  /** Declared Zustand version spec. Optional so existing `ProjectInfo` consumers remain source-compatible. */
+  zustandVersion?: string | null;
+  /** Parsed major from `zustandVersion`, or `null` when absent/unparseable. */
+  zustandMajorVersion?: number | null;
   framework: Framework;
   hasTypeScript: boolean;
   hasReactCompiler: boolean;
+  hasReactCompilerLintPlugin?: boolean;
   hasTanStackQuery: boolean;
+  hasRemotion?: boolean;
+  remotionVersion?: string | null;
+  remotionMajorVersion?: number | null;
+  hasI18nLibrary?: boolean;
+  tanstackQueryVersion?: string | null;
+  styledComponentsVersion?: string | null;
+  /** Whether the project or one of its workspaces declares Three.js, Fiber, or Drei. */
+  hasThree?: boolean;
+  /** Lowest declared Three.js version across the project and its workspaces. */
+  threeVersion?: string | null;
+  /** Three.js release number parsed from threeVersion (`0.146.x` becomes 146). */
+  threeRelease?: number | null;
+  /** Whether the project or one of its workspaces declares React Three Fiber or Drei. */
+  hasReactThreeFiber?: boolean;
+  /** Declared version of @react-three/fiber or its legacy package name, when directly present. */
+  reactThreeFiberVersion?: string | null;
+  /** Parsed major from reactThreeFiberVersion, or null when absent or unparseable. */
+  reactThreeFiberMajorVersion?: number | null;
+  /**
+   * The declared `valtio` version spec, or `null` when no package in the
+   * analyzed project declares Valtio. `useSnapshot` has kept the same
+   * render-read contract across Valtio 1 and 2, so presence alone drives the
+   * `valtio` capability and its parsed major-version ladder.
+   */
+  valtioVersion: string | null;
+  /** Parsed major from `valtioVersion`, or `null` when absent/unparseable. */
+  valtioMajorVersion: number | null;
+  /**
+   * `true` when the project or a workspace declares a Vite-based SSR runtime
+   * such as React Router's Node adapter, Vike, or vite-plugin-ssr.
+   */
+  hasSsrDependency: boolean;
   /**
    * The declared `preact` version spec, or `null` when Preact isn't a
    * dependency. Parallels `reactVersion` so a React-compatible runtime is
@@ -51,6 +92,10 @@ export interface ProjectInfo {
   hasReactNativeWorkspace: boolean;
   nextjsVersion: string | null;
   nextjsMajorVersion: number | null;
+  /** Declared React Router runtime version from `@react-router/dev`, `react-router-dom`, or `react-router`. */
+  reactRouterVersion?: string | null;
+  /** Whether the project declares `@react-router/dev` and therefore uses Framework mode. */
+  hasReactRouterFramework?: boolean;
   /**
    * The declared `expo` package version spec (e.g. `"~51.0.0"`), looked up
    * in the project or any of its workspace packages, or `null` when `expo`
@@ -84,6 +129,13 @@ export interface ProjectInfo {
    */
   hasReanimated: boolean;
   /**
+   * The declared `react-native-reanimated` version spec, or `null` when
+   * absent. The Compiler-compatible `.get()` / `.set()` accessors only
+   * exist from reanimated 3.15.0, so the shared-value hint must not
+   * recommend them to projects pinned below that.
+   */
+  reanimatedVersion: string | null;
+  /**
    * `true` when the project's `tsconfig.json` `compilerOptions.target` or
    * `compilerOptions.lib` indicates the output environment predates ES2023
    * (e.g. `target: "es2022"` or `lib: ["es2022"]`). Drives the `pre-es2023`
@@ -94,6 +146,16 @@ export interface ProjectInfo {
    * the config is unparseable — the safe default is to keep the rule active.
    */
   isPreES2023Target: boolean;
+  /**
+   * `true` when a Next.js project sets `output: "export"` in `next.config.*`
+   * (static HTML export — no request-time server). Drives the
+   * `nextjs:static-export` capability and excludes the project from
+   * `server-actions`, so rules stop recommending server-only fixes (server
+   * `redirect()`, middleware, Server Actions) that don't exist under a static
+   * export. `false` for non-Next projects, when no config sets it, or when the
+   * config is unparseable — the safe default keeps server-aware advice active.
+   */
+  isStaticExport: boolean;
   sourceFileCount: number;
 }
 
@@ -101,6 +163,7 @@ export interface PackageJson {
   name?: string;
   version?: string;
   main?: string;
+  babel?: unknown;
   scripts?: Record<string, string>;
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;

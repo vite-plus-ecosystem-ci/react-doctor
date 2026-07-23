@@ -6,10 +6,14 @@ import {
 } from "../../constants/js.js";
 import { SEQUENTIAL_AWAIT_THRESHOLD } from "../../constants/thresholds.js";
 import { defineRule } from "../../utils/define-rule.js";
+import { expressionReadsPatternBinding } from "../../utils/expression-reads-pattern-binding.js";
+import { isFunctionLike } from "../../utils/is-function-like.js";
 import { normalizeFilename } from "../../utils/normalize-filename.js";
 import { getCalleeIdentifierTrail } from "../../utils/get-callee-identifier-trail.js";
+import { getOrderIndependentLocalFunction } from "../../utils/get-order-independent-local-function.js";
+import { hasPossibleStaticMemberCallWrite } from "../../utils/has-static-property-write-before.js";
 import { isTestLibraryImportSource } from "../../utils/is-test-library-import-source.js";
-import { walkAst } from "../../utils/walk-ast.js";
+import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
@@ -52,47 +56,111 @@ const isIntentionalSequencingAwait = (awaitedCall: EsTreeNode | null): boolean =
   return trail.some((name) => INTENTIONAL_SEQUENCING_CALLEE_NAMES.has(name));
 };
 
+// A bare `await sideEffect();` executes for its effect, and its position
+// in the sequence usually IS the point (save → refresh → open, protocol
+// handshakes, cache invalidation after a write). A run containing one is
+// ordered by intent, not by accident.
+const isBareExpressionAwait = (statement: EsTreeNode): boolean =>
+  isNodeOfType(statement, "ExpressionStatement") &&
+  isNodeOfType(statement.expression, "AwaitExpression");
+
+const hasOrderIndependentBareAwaitArguments = (callExpression: EsTreeNode): boolean => {
+  const unwrappedCallExpression = stripParenExpression(callExpression);
+  if (!isNodeOfType(unwrappedCallExpression, "CallExpression")) return false;
+  return unwrappedCallExpression.arguments.every((argument) => {
+    if (isNodeOfType(argument, "SpreadElement")) return false;
+    const unwrappedArgument = stripParenExpression(argument);
+    return (
+      isNodeOfType(unwrappedArgument, "Identifier") || isNodeOfType(unwrappedArgument, "Literal")
+    );
+  });
+};
+
+// Awaiting something that is not a call (`await feManifestPromise`)
+// settles work that already started — sequencing it costs no wall time,
+// so there is nothing to parallelize.
+const isNonCallAwait = (statement: EsTreeNode): boolean => {
+  const awaitedExpression = getAwaitedCall(statement);
+  if (!awaitedExpression) return false;
+  const stripped = stripParenExpression(awaitedExpression);
+  return (
+    !isNodeOfType(stripped, "CallExpression") &&
+    !isNodeOfType(stripped, "NewExpression") &&
+    !isNodeOfType(stripped, "ImportExpression")
+  );
+};
+
 // Skip a consecutive-await block whenever any one of its awaits is an
-// ordered-UI-flow call or an intentional sequencing call. A single
+// ordered-UI-flow call, an intentional sequencing call, a bare
+// side-effect await, or an await of an already-started promise. A single
 // `await page.click(...)` in the middle of three otherwise-independent
 // awaits is enough to mark the whole sequence as deliberately
 // serialized — collapsing it into `Promise.all([...])` would change
 // observable behavior.
-const sequenceContainsSerializationSignal = (statements: EsTreeNode[]): boolean => {
+const sequenceContainsSerializationSignal = (
+  statements: EsTreeNode[],
+  context: RuleContext,
+): boolean => {
+  let bareAwaitFunction: EsTreeNode | null = null;
   for (const statement of statements) {
+    if (isNonCallAwait(statement)) return true;
     const awaitedCall = getAwaitedCall(statement);
+    if (awaitedCall && hasPossibleStaticMemberCallWrite(awaitedCall, context.scopes)) return true;
+    const orderIndependentFunction = awaitedCall
+      ? getOrderIndependentLocalFunction(awaitedCall, context.scopes)
+      : null;
+    if (isBareExpressionAwait(statement)) {
+      if (orderIndependentFunction === null) return true;
+      if (!awaitedCall || !hasOrderIndependentBareAwaitArguments(awaitedCall)) return true;
+      if (bareAwaitFunction !== null && bareAwaitFunction !== orderIndependentFunction) return true;
+      bareAwaitFunction = orderIndependentFunction;
+    }
     if (isOrderedUiFlowAwait(awaitedCall)) return true;
-    if (isIntentionalSequencingAwait(awaitedCall)) return true;
+    if (isIntentionalSequencingAwait(awaitedCall) && orderIndependentFunction === null) return true;
+  }
+  return false;
+};
+
+// Statements inside a `db.transaction(async (tx) => { ... })` callback
+// run on one dedicated connection; issuing them concurrently is not just
+// pointless but incorrect, so the whole block is exempt.
+const isInsideTransactionCallback = (node: EsTreeNode): boolean => {
+  let current: EsTreeNode | null | undefined = node.parent;
+  while (current) {
+    if (isFunctionLike(current)) {
+      const callParent = current.parent;
+      if (callParent && isNodeOfType(callParent, "CallExpression")) {
+        const callee = callParent.callee;
+        if (
+          isNodeOfType(callee, "MemberExpression") &&
+          isNodeOfType(callee.property, "Identifier") &&
+          callee.property.name === "transaction"
+        ) {
+          return true;
+        }
+        if (isNodeOfType(callee, "Identifier") && callee.name === "transaction") return true;
+      }
+    }
+    current = current.parent ?? null;
   }
   return false;
 };
 
 const reportIfIndependent = (statements: EsTreeNode[], context: RuleContext): void => {
-  const declaredNames = new Set<string>();
+  const declaredPatterns: EsTreeNode[] = [];
 
   for (const statement of statements) {
-    // Both `const x = await f(prev)` and a bare `await f(prev)` count
-    // toward the threshold, so both must be checked for a data
-    // dependency on an earlier result — otherwise a sequence whose
-    // ordering is forced by an expression-statement await reads as
-    // independent and gets a spurious `Promise.all()` suggestion.
     const awaitArgument = getAwaitedCall(statement);
     if (!awaitArgument) continue;
 
-    let referencesEarlierResult = false;
-    walkAst(awaitArgument, (child: EsTreeNode) => {
-      if (isNodeOfType(child, "Identifier") && declaredNames.has(child.name)) {
-        referencesEarlierResult = true;
-      }
-    });
+    if (expressionReadsPatternBinding(awaitArgument, declaredPatterns, context.scopes)) return;
 
-    if (referencesEarlierResult) return;
-
-    if (
-      isNodeOfType(statement, "VariableDeclaration") &&
-      isNodeOfType(statement.declarations[0]?.id, "Identifier")
-    ) {
-      declaredNames.add(statement.declarations[0].id.name);
+    // Destructured results (`const { prepareConfig } = await import(…)`,
+    // `const [row] = await db.insert(…)`) bind names a later await may
+    // consume, so every pattern-bound name must join the dependency set —
+    // not just plain identifier declarations.
+    if (isNodeOfType(statement, "VariableDeclaration") && statement.declarations[0]?.id) {
+      declaredPatterns.push(statement.declarations[0].id);
     }
   }
 
@@ -134,11 +202,12 @@ export const asyncParallel = defineRule({
       },
       BlockStatement(node: EsTreeNodeOfType<"BlockStatement">) {
         if (shouldSkipFile()) return;
+        if (isInsideTransactionCallback(node)) return;
         const consecutiveAwaitStatements: EsTreeNode[] = [];
 
         const flushConsecutiveAwaits = (): void => {
           if (consecutiveAwaitStatements.length >= SEQUENTIAL_AWAIT_THRESHOLD) {
-            if (!sequenceContainsSerializationSignal(consecutiveAwaitStatements)) {
+            if (!sequenceContainsSerializationSignal(consecutiveAwaitStatements, context)) {
               reportIfIndependent(consecutiveAwaitStatements, context);
             }
           }

@@ -4,6 +4,19 @@ import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import type { RuleContext } from "../../utils/rule-context.js";
+import { stripParenExpression } from "../../utils/strip-paren-expression.js";
+
+const BOUNDED_PIPELINE_SOURCE_METHOD_NAMES = new Set(["slice", "split"]);
+
+const isBoundedPipelineSource = (node: EsTreeNode): boolean => {
+  const receiver = stripParenExpression(node);
+  return (
+    isNodeOfType(receiver, "CallExpression") &&
+    isNodeOfType(receiver.callee, "MemberExpression") &&
+    isNodeOfType(receiver.callee.property, "Identifier") &&
+    BOUNDED_PIPELINE_SOURCE_METHOD_NAMES.has(receiver.callee.property.name)
+  );
+};
 
 export const jsFlatmapFilter = defineRule({
   id: "js-flatmap-filter",
@@ -39,7 +52,7 @@ export const jsFlatmapFilter = defineRule({
 
       if (!isFilterBoolean) return;
 
-      const innerCall = node.callee.object;
+      const innerCall = stripParenExpression(node.callee.object);
       if (
         !isNodeOfType(innerCall, "CallExpression") ||
         !isNodeOfType(innerCall.callee, "MemberExpression") ||
@@ -53,7 +66,8 @@ export const jsFlatmapFilter = defineRule({
       // `[a, b, c].map(...).filter(Boolean)` — iterating a small
       // literal twice is trivial cost; the flatMap rewrite is pure
       // ceremony at this scale.
-      const receiver: EsTreeNode | null | undefined = innerCall.callee.object;
+      const receiver: EsTreeNode | null | undefined = stripParenExpression(innerCall.callee.object);
+      if (receiver && isBoundedPipelineSource(receiver)) return;
       if (receiver && isNodeOfType(receiver, "ArrayExpression")) {
         const elements = receiver.elements ?? [];
         if (

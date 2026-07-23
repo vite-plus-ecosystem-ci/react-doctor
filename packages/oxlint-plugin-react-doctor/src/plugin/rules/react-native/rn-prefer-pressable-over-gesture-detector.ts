@@ -2,7 +2,7 @@ import { defineRule } from "../../utils/define-rule.js";
 import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
 import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import type { RuleContext } from "../../utils/rule-context.js";
-import { resolveJsxElementName } from "./utils/resolve-jsx-element-name.js";
+import { resolveJsxElementName } from "../../utils/resolve-jsx-element-name.js";
 import { isImportedFromModule } from "../../utils/find-import-source-for-name.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
@@ -53,7 +53,8 @@ const analyzeGestureChain = (expression: EsTreeNode): GestureChainInfo | null =>
     const methodName = callee.property.name;
     // The outermost call is the most-recent .method() in the chain;
     // we walk inward through the receivers until the chain root.
-    if (isNodeOfType(callee.object, "Identifier") && callee.object.name === "Gesture") {
+    const receiver = stripParenExpression(callee.object);
+    if (isNodeOfType(receiver, "Identifier") && receiver.name === "Gesture") {
       return {
         factoryName: methodName,
         chainMethodNames,
@@ -73,7 +74,7 @@ const analyzeGestureChain = (expression: EsTreeNode): GestureChainInfo | null =>
       numberOfTapsArgument = callExpression.arguments[0] ?? null;
     }
     chainMethodNames.push(methodName);
-    cursor = callee.object as EsTreeNode | null;
+    cursor = receiver;
   }
   return null;
 };

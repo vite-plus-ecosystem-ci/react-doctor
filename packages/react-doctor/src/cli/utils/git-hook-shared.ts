@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import * as path from "node:path";
 import * as fs from "node:fs";
+import { RUN_GIT_MAX_BUFFER_BYTES } from "./constants.js";
 
 export const HOOK_FILE_NAME = "pre-commit";
 export const HOOK_RELATIVE_PATH = "hooks/pre-commit";
@@ -27,17 +28,21 @@ export const NON_BLOCKING_REACT_DOCTOR_COMMAND = [
 ].join(" ");
 const PACKAGE_JSON_FILE_NAME = "package.json";
 
-export const runGit = (projectRoot: string, args: ReadonlyArray<string>): string | null => {
+export const runGitRaw = (projectRoot: string, args: ReadonlyArray<string>): string | null => {
   try {
     return execFileSync("git", [...args], {
       cwd: projectRoot,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+      maxBuffer: RUN_GIT_MAX_BUFFER_BYTES,
+    });
   } catch {
     return null;
   }
 };
+
+export const runGit = (projectRoot: string, args: ReadonlyArray<string>): string | null =>
+  runGitRaw(projectRoot, args)?.trim() ?? null;
 
 export const resolveGitPath = (baseDirectory: string, value: string): string =>
   path.isAbsolute(value) ? value : path.resolve(baseDirectory, value);

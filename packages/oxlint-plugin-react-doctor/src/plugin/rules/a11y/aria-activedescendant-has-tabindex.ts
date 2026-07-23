@@ -1,4 +1,5 @@
 import { HTML_TAGS } from "../../constants/html-tags.js";
+import { canContentEditableBeTabbable } from "../../utils/can-content-editable-be-tabbable.js";
 import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { getElementType } from "../../utils/get-element-type.js";
@@ -37,6 +38,7 @@ export const ariaActivedescendantHasTabindex = defineRule({
       }
       // No tabIndex — interactive elements are implicitly tabbable.
       if (isInteractiveElement(tag, node)) return;
+      if (canContentEditableBeTabbable(node, context.scopes, context.settings)) return;
       context.report({ node: node.name, message: MESSAGE });
     },
   }),

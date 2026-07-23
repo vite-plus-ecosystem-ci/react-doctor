@@ -9,7 +9,7 @@ import { findVariableInitializer } from "../../utils/find-variable-initializer.j
 import { getInitializerModuleSource } from "../../utils/get-initializer-module-source.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { RuleContext } from "../../utils/rule-context.js";
-import { resolveJsxElementName } from "./utils/resolve-jsx-element-name.js";
+import { resolveJsxElementName } from "../../utils/resolve-jsx-element-name.js";
 import { resolveImportedRecyclerName } from "./utils/resolve-imported-recycler-name.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
@@ -141,6 +141,10 @@ export const rnListDataMapped = defineRule({
   title: "List data rebuilt every render",
   tags: ["test-noise"],
   requires: ["react-native"],
+  // React Compiler memoizes the `.map(...)` result, so the array keeps its
+  // identity between renders and memoized rows are not busted. Mirrors the
+  // gate on the sibling `rn-*` inline-prop rules.
+  disabledWhen: ["react-compiler"],
   severity: "warn",
   recommendation:
     "This builds a new array each time the parent redraws, so every row redraws too. Wrap it in `useMemo(() => items.map(...), [items])` to keep the same array.",

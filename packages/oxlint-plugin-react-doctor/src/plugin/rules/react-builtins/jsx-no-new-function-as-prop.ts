@@ -2,6 +2,7 @@ import { defineRule } from "../../utils/define-rule.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { findVariableInitializer } from "../../utils/find-variable-initializer.js";
+import { hasCustomMemoComparator } from "../../utils/has-custom-memo-comparator.js";
 import { isInsideFunctionScope } from "../../utils/is-inside-function-scope.js";
 import { isJsxAttributeOnIntrinsicHtmlElement } from "../../utils/is-on-intrinsic-html-element.js";
 import {
@@ -502,7 +503,7 @@ export const jsxNoNewFunctionAsProp = defineRule({
   severity: "warn",
   // React Compiler auto-memoizes inline callbacks. The perf footgun this
   // rule guards against doesn't exist in compiler-enabled projects.
-  disabledBy: ["react-compiler"],
+  disabledWhen: ["react-compiler"],
   recommendation:
     "Wrap the callback in `useCallback` or move it outside the component so memoized children do not redraw every render.",
   category: "Performance",
@@ -545,6 +546,10 @@ export const jsxNoNewFunctionAsProp = defineRule({
             ? (parentJsxOpening.name as EsTreeNode)
             : null;
         if (memoStatusForJsxOpeningName(memoRegistry, openingName) !== "memoised") return;
+        // `memo(fn, arePropsEqual)` compares props with the author's own
+        // function, which routinely ignores reference identity — a fresh
+        // function cannot break that bailout.
+        if (hasCustomMemoComparator(openingName, context.scopes)) return;
         // One-shot lifecycle handlers (onMount / onError / onClose /
         // etc.) and render-prop slots (`fallback`, `render*`, `*Render`,
         // `*Renderer`, etc.) accept inline functions by design — they

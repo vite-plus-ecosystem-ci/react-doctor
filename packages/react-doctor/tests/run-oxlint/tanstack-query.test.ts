@@ -13,7 +13,9 @@ describe("runOxlint", () => {
       rootDirectory: BASIC_REACT_DIRECTORY,
       project: buildTestProject({
         rootDirectory: BASIC_REACT_DIRECTORY,
-        hasTanStackQuery: true,
+        tanstackQueryVersion: "^5.66.0",
+        mobxVersion: null,
+        styledComponentsVersion: null,
       }),
     });
   });
@@ -29,7 +31,9 @@ describe("runOxlint", () => {
         rootDirectory: BASIC_REACT_DIRECTORY,
         project: buildTestProject({
           rootDirectory: BASIC_REACT_DIRECTORY,
-          hasTanStackQuery: true,
+          tanstackQueryVersion: "^5.66.0",
+          mobxVersion: null,
+          styledComponentsVersion: null,
         }),
         includePaths: [
           path.join(BASIC_REACT_DIRECTORY, "src/tanstack-query-destructure.tsx"),
@@ -62,7 +66,7 @@ describe("runOxlint", () => {
       // The fixture has two useMutation calls: line ~51 with NO cache
       // update (must fire), and the setQueryData example a few lines
       // below (must NOT fire).
-      expect(mutationLines).toEqual([51]);
+      expect(mutationLines).toEqual([40]);
     });
   });
 
@@ -73,6 +77,16 @@ describe("runOxlint", () => {
         fixture: "src/query-issues.tsx",
         ruleSource: "rules/tanstack-query.ts",
         severity: "warning",
+        category: "Bugs",
+      },
+      "query-floating-mutate-async": {
+        fixture: "src/query-issues.tsx",
+        ruleSource: "rules/tanstack-query.ts",
+        category: "Bugs",
+      },
+      "query-no-mutation-in-effect-as-read": {
+        fixture: "src/query-issues.tsx",
+        ruleSource: "rules/tanstack-query.ts",
         category: "Bugs",
       },
       "query-no-rest-destructuring": {

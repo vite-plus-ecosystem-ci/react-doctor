@@ -96,10 +96,45 @@ describe("stripUnknownCliFlags", () => {
       "--cwd",
       ".",
     ]);
+    expect(stripUserArguments(["experimental-tui", ".", "--color"])).toEqual([
+      "experimental-tui",
+      ".",
+      "--color",
+    ]);
+    expect(stripUserArguments(["experimental-tui", ".", "--no-color"])).toEqual([
+      "experimental-tui",
+      ".",
+      "--no-color",
+    ]);
+  });
+
+  it("keeps the blocking level on the experimental TUI command", () => {
+    expect(stripUserArguments(["experimental-tui", ".", "--blocking", "none"])).toEqual([
+      "experimental-tui",
+      ".",
+      "--blocking",
+      "none",
+    ]);
   });
 
   it("keeps the --no-telemetry alias for --no-score", () => {
     expect(stripUserArguments([".", "--no-telemetry"])).toEqual([".", "--no-telemetry"]);
+  });
+
+  it("keeps the phase opt-out flags so Commander can toggle each scan phase", () => {
+    expect(stripUserArguments([".", "--no-lint", "--no-dead-code", "--no-supply-chain"])).toEqual([
+      ".",
+      "--no-lint",
+      "--no-dead-code",
+      "--no-supply-chain",
+    ]);
+    expect(stripUserArguments([".", "--supply-chain"])).toEqual([".", "--supply-chain"]);
+  });
+
+  it("keeps standard scan flags on the design subcommand", () => {
+    expect(
+      stripUserArguments(["design", "./apps/web", "--verbose", "--scope", "changed", "--json"]),
+    ).toEqual(["design", "./apps/web", "--verbose", "--scope", "changed", "--json"]);
   });
 
   it("keeps color flags on the version subcommand and drops unknown ones", () => {

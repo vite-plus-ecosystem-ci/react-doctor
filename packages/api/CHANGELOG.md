@@ -1,5 +1,110 @@
 # @react-doctor/api
 
+## 0.8.3
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @react-doctor/core@0.8.3
+
+## 0.8.2
+
+### Patch Changes
+
+- Updated dependencies [[`f4aa821`](https://github.com/millionco/react-doctor/commit/f4aa8214bfac4b52c5613f25bbad29e68cbeb28d), [`8c4959b`](https://github.com/millionco/react-doctor/commit/8c4959bb7400a6d5f21cc35a8d54d0ed7faf6971), [`0b0b5ac`](https://github.com/millionco/react-doctor/commit/0b0b5ac52301cbfbb5abdffe4d0d9bf673325a94), [`af33723`](https://github.com/millionco/react-doctor/commit/af337232873fa5c96ec69fac453868f14a9be071), [`3598138`](https://github.com/millionco/react-doctor/commit/3598138c7bdd55dac55bf17bc72ccfef1e4c2efd), [`cd9ca68`](https://github.com/millionco/react-doctor/commit/cd9ca68faa25d287c02f4bbdc5007e1fbe1c6fc1), [`1839566`](https://github.com/millionco/react-doctor/commit/18395664810b9e08d024f4b679d7ab2089b05b7e)]:
+  - @react-doctor/core@0.8.2
+
+## 0.8.1
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @react-doctor/core@0.8.1
+
+## 0.8.0
+
+### Patch Changes
+
+- Updated dependencies [[`2979a9b`](https://github.com/millionco/react-doctor/commit/2979a9bc1b1f18c685bafe6d92edb20b4b1a8707)]:
+  - @react-doctor/core@0.8.0
+
+## 0.7.9
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @react-doctor/core@0.7.9
+
+## 0.7.8
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @react-doctor/core@0.7.8
+
+## 0.7.7
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @react-doctor/core@0.7.7
+
+## 0.7.6
+
+### Patch Changes
+
+- Updated dependencies [[`037bd56`](https://github.com/millionco/react-doctor/commit/037bd569eca61132deb581511d8893c05ee87bf6)]:
+  - @react-doctor/core@0.7.6
+
+## 0.7.5
+
+### Patch Changes
+
+- Updated dependencies [[`99ac4ff`](https://github.com/millionco/react-doctor/commit/99ac4ff842ea8819b4cfce2548bddf0f5b47e6df)]:
+  - @react-doctor/core@0.7.5
+
+## 0.7.4
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @react-doctor/core@0.7.4
+
+## 0.7.3
+
+### Patch Changes
+
+- Updated dependencies [[`08b768b`](https://github.com/millionco/react-doctor/commit/08b768bb4a7ce80927f7ad15bc3850a1f7585457)]:
+  - @react-doctor/core@0.7.3
+
+## 0.7.2
+
+### Patch Changes
+
+- Updated dependencies [[`9cb4149`](https://github.com/millionco/react-doctor/commit/9cb414905de7b360d728ca08d45167116a94ee90), [`d353dad`](https://github.com/millionco/react-doctor/commit/d353dadf988c52e3037dff52eec9cf8923145364), [`5d2f17f`](https://github.com/millionco/react-doctor/commit/5d2f17f71c9fb8e0d8d649da1b26de8f5cfe6c34), [`9cb4149`](https://github.com/millionco/react-doctor/commit/9cb414905de7b360d728ca08d45167116a94ee90), [`ce9dabf`](https://github.com/millionco/react-doctor/commit/ce9dabf1103f4f989bb8f9c1783a24674ba163e7)]:
+  - @react-doctor/core@0.7.2
+
+## 0.7.1
+
+### Patch Changes
+
+- Updated dependencies [[`c0c3fc1`](https://github.com/millionco/react-doctor/commit/c0c3fc170972876c8bbc2419b32e66b9c864df85)]:
+  - @react-doctor/core@0.7.1
+
+## 0.7.0
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @react-doctor/core@0.7.0
+
+## 0.6.3
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @react-doctor/core@0.6.3
+
 ## 0.6.2
 
 ### Patch Changes

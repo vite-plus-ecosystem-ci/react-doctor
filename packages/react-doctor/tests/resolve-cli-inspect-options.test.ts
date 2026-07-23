@@ -135,3 +135,39 @@ describe("resolveCliInspectOptions: category filtering", () => {
     );
   });
 });
+
+describe("resolveCliInspectOptions: scan-phase flags", () => {
+  // Passed through as scan options (not folded into config) so the flag wins
+  // over per-project config in `inspect()`'s merge, matching lint/deadCode.
+  it("passes lint / deadCode / supplyChain through unchanged", () => {
+    const off = resolveCliInspectOptions(
+      { lint: false, deadCode: false, supplyChain: false },
+      null,
+    );
+    expect(off.lint).toBe(false);
+    expect(off.deadCode).toBe(false);
+    expect(off.supplyChain).toBe(false);
+
+    const unset = resolveCliInspectOptions({}, null);
+    expect(unset.supplyChain).toBeUndefined();
+    expect(resolveCliInspectOptions({ supplyChain: true }, null).supplyChain).toBe(true);
+  });
+});
+
+describe("resolveCliInspectOptions: design scan", () => {
+  it("selects design rules while skipping unrelated analyzers and scoring", () => {
+    const resolved = resolveCliInspectOptions(
+      { design: true, deadCode: true, supplyChain: true, score: true },
+      null,
+    );
+
+    expect(resolved.includedTags).toEqual(new Set(["design"]));
+    expect(resolved.includeTagDefaults).toBe(true);
+    expect(resolved.deadCode).toBe(false);
+    expect(resolved.supplyChain).toBe(false);
+    expect(resolved.noScore).toBe(true);
+    expect(resolved.scoreDisabledMessage).toBe(
+      "Design scans do not affect the React health score.",
+    );
+  });
+});

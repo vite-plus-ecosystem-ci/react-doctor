@@ -162,6 +162,31 @@ export const Multi = () => {
     });
     expect(await collectRuleHits(projectDir, "no-cascading-set-state")).toHaveLength(0);
   });
+
+  it("no-cascading-set-state: does not count setters inside a stored handler the effect only registers", async () => {
+    const projectDir = setupReactProject(tempRoot, "cascade-stored-listener", {
+      files: {
+        "src/Multi.tsx": `import { useEffect, useState } from "react";
+export const Multi = () => {
+  const [a, setA] = useState(0);
+  const [b, setB] = useState(0);
+  const [c, setC] = useState(0);
+  useEffect(() => {
+    const onResize = () => {
+      setA(1);
+      setB(2);
+      setC(3);
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  });
+  return <div>{a}{b}{c}</div>;
+};
+`,
+      },
+    });
+    expect(await collectRuleHits(projectDir, "no-cascading-set-state")).toHaveLength(0);
+  });
 });
 
 describe("effect-family rules: genuine smells still fire", () => {
@@ -226,7 +251,7 @@ export const Toggle = ({ onOpen }: { onOpen: () => void }) => {
     expect((await collectRuleHits(projectDir, "no-event-handler")).length).toBeGreaterThan(0);
   });
 
-  it("no-cascading-set-state: still flags a synchronous forEach cascade", async () => {
+  it("no-cascading-set-state: stays quiet on a synchronous forEach batch", async () => {
     const projectDir = setupReactProject(tempRoot, "tp-cascade-foreach", {
       files: {
         "src/Sync.tsx": `import { useEffect, useState } from "react";
@@ -246,35 +271,34 @@ export const Sync = ({ items }: { items: number[] }) => {
 `,
       },
     });
-    expect((await collectRuleHits(projectDir, "no-cascading-set-state")).length).toBeGreaterThan(0);
+    expect(await collectRuleHits(projectDir, "no-cascading-set-state")).toHaveLength(0);
   });
 
-  it("no-cascading-set-state: flags a stored listener handler that fans out over 3 setters", async () => {
-    const projectDir = setupReactProject(tempRoot, "tp-cascade-stored-listener", {
+  it("no-cascading-set-state: stays quiet on a synchronous helper batch", async () => {
+    const projectDir = setupReactProject(tempRoot, "tp-cascade-stored-helper", {
       files: {
         "src/Multi.tsx": `import { useEffect, useState } from "react";
-export const Multi = () => {
+export const Multi = ({ id }: { id: string }) => {
   const [a, setA] = useState(0);
   const [b, setB] = useState(0);
   const [c, setC] = useState(0);
   useEffect(() => {
-    const onResize = () => {
+    const applyAll = () => {
       setA(1);
       setB(2);
       setC(3);
     };
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  });
+    applyAll();
+  }, [id]);
   return <div>{a}{b}{c}</div>;
 };
 `,
       },
     });
-    expect((await collectRuleHits(projectDir, "no-cascading-set-state")).length).toBeGreaterThan(0);
+    expect(await collectRuleHits(projectDir, "no-cascading-set-state")).toHaveLength(0);
   });
 
-  it("no-cascading-set-state: still flags 3 synchronous setters in the effect body", async () => {
+  it("no-cascading-set-state: stays quiet on synchronous effect setters", async () => {
     const projectDir = setupReactProject(tempRoot, "tp-cascade", {
       files: {
         "src/Init.tsx": `import { useEffect, useState } from "react";
@@ -292,6 +316,6 @@ export const Init = ({ id }: { id: string }) => {
 `,
       },
     });
-    expect((await collectRuleHits(projectDir, "no-cascading-set-state")).length).toBeGreaterThan(0);
+    expect(await collectRuleHits(projectDir, "no-cascading-set-state")).toHaveLength(0);
   });
 });

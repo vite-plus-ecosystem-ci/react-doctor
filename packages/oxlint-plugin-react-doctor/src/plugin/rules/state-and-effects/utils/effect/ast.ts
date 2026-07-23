@@ -4,18 +4,50 @@ import type { EsTreeNodeOfType } from "../../../../utils/es-tree-node-of-type.js
 import { isAstNode } from "../../../../utils/is-ast-node.js";
 import { isFunctionLike } from "../../../../utils/is-function-like.js";
 import { isNodeOfType } from "../../../../utils/is-node-of-type.js";
+import { TRANSPARENT_EXPRESSION_WRAPPER_TYPES } from "../../../../utils/strip-paren-expression.js";
+import { getAstChildKeys } from "./get-ast-child-keys.js";
 import { getScopeForNode, type ProgramAnalysis } from "./get-program-analysis.js";
-import { VISITOR_KEYS } from "./constants.js";
 
 // 1:1 port of upstream `src/util/ast.js` from
 // `eslint-plugin-react-you-might-not-need-an-effect`. Upstream uses
 // `context.sourceCode.getScope(node)` and `context.sourceCode.visitorKeys`.
 // We thread the cached `ProgramAnalysis` (eslint-scope ScopeManager)
-// through every helper and use `eslint-visitor-keys.KEYS` as the
-// static visitorKeys table.
+// through every helper and use Oxc's visitor keys for its AST.
 
-const getChildKeys = (node: EsTreeNode): ReadonlyArray<string> =>
-  VISITOR_KEYS[node.type] ?? Object.keys(node).filter((key) => key !== "parent");
+// A function-expression ARGUMENT of a binding's initializer call
+// (`const observer = new MutationObserver((m) => setN(m.length))`) is a
+// callback the instance invokes later — using the binding does not run
+// it, so refs inside it must not count as the binding's own call graph.
+// Bare identifier arguments (`const debounced = debounce(setN)`) still do.
+const HOOK_NAME_PATTERN = /^use[A-Z0-9]/;
+
+export const isInsideCallbackArgumentOf = (
+  identifier: EsTreeNode,
+  initializer: EsTreeNode,
+): boolean => {
+  if (!isNodeOfType(initializer, "CallExpression") && !isNodeOfType(initializer, "NewExpression")) {
+    return false;
+  }
+  // Hook wrappers (`useCallback(fn, deps)`, `useMemo(() => fn, deps)`)
+  // return the wrapped function itself — calling the binding DOES run it.
+  if (
+    isNodeOfType(initializer, "CallExpression") &&
+    isNodeOfType(initializer.callee, "Identifier") &&
+    HOOK_NAME_PATTERN.test(initializer.callee.name)
+  ) {
+    return false;
+  }
+  const callbackArguments = (initializer.arguments ?? []).filter((argument) =>
+    isFunctionLike(argument as EsTreeNode),
+  );
+  if (callbackArguments.length === 0) return false;
+  let node: EsTreeNode | null | undefined = identifier;
+  while (node && node !== initializer) {
+    if ((callbackArguments as ReadonlyArray<unknown>).includes(node)) return true;
+    node = (node as unknown as { parent?: EsTreeNode | null }).parent;
+  }
+  return false;
+};
 
 const ascend = (
   analysis: ProgramAnalysis,
@@ -40,6 +72,9 @@ const ascend = (
     const next = (defNode.init ?? defNode.body) as EsTreeNode | undefined;
     if (!next) continue;
     for (const innerRef of getDownstreamRefs(analysis, next)) {
+      if (isInsideCallbackArgumentOf(innerRef.identifier as unknown as EsTreeNode, next)) {
+        continue;
+      }
       ascend(analysis, innerRef, visit, visited);
     }
   }
@@ -54,7 +89,7 @@ const descend = (
   visit(node);
   visited.add(node);
 
-  const keys = getChildKeys(node);
+  const keys = getAstChildKeys(node);
   const record = node as unknown as Record<string, unknown>;
   for (const key of keys) {
     const child = record[key];
@@ -69,11 +104,23 @@ const descend = (
   }
 };
 
+// The upstream-reference chain for a given (analysis, ref) is deterministic
+// and read-only for every caller, so the def-chain ascent runs once per ref.
+const upstreamRefsCache = new WeakMap<ProgramAnalysis, WeakMap<Reference, Reference[]>>();
+
 export const getUpstreamRefs = (analysis: ProgramAnalysis, ref: Reference): Reference[] => {
+  let upstreamByRef = upstreamRefsCache.get(analysis);
+  if (!upstreamByRef) {
+    upstreamByRef = new WeakMap();
+    upstreamRefsCache.set(analysis, upstreamByRef);
+  }
+  const cached = upstreamByRef.get(ref);
+  if (cached) return cached;
   const refs: Reference[] = [];
   ascend(analysis, ref, (upRef) => {
     refs.push(upRef);
   });
+  upstreamByRef.set(ref, refs);
   return refs;
 };
 
@@ -86,12 +133,20 @@ export const findDownstreamNodes = (topNode: EsTreeNode, type: string): EsTreeNo
 };
 
 export const getRef = (analysis: ProgramAnalysis, identifier: EsTreeNode): Reference | null => {
-  const scope = getScopeForNode(identifier, analysis.scopeManager);
-  if (!scope) return null;
-  for (const reference of scope.references) {
-    if (reference.identifier === identifier) return reference;
+  const refByIdentifier = analysis.referenceByIdentifier;
+  if (refByIdentifier.has(identifier)) return refByIdentifier.get(identifier) ?? null;
+  let resolvedReference: Reference | null = null;
+  const scope = getScopeForNode(identifier, analysis);
+  if (scope) {
+    for (const reference of scope.references) {
+      if (reference.identifier === identifier) {
+        resolvedReference = reference;
+        break;
+      }
+    }
   }
-  return null;
+  refByIdentifier.set(identifier, resolvedReference);
+  return resolvedReference;
 };
 
 // Memoize per (analysis, node). `analysis` is the per-Program singleton
@@ -132,7 +187,11 @@ export const getCallExpr = (
     let node: EsTreeNode = ref.identifier as unknown as EsTreeNode;
     let parent: EsTreeNode | null | undefined = (node as unknown as { parent?: EsTreeNode | null })
       .parent;
-    while (parent && isNodeOfType(parent, "MemberExpression")) {
+    while (
+      parent &&
+      (isNodeOfType(parent, "MemberExpression") ||
+        TRANSPARENT_EXPRESSION_WRAPPER_TYPES.has(parent.type))
+    ) {
       node = parent;
       parent = (node as unknown as { parent?: EsTreeNode | null }).parent;
     }
@@ -140,7 +199,10 @@ export const getCallExpr = (
       return current;
     }
   }
-  if (isNodeOfType(current, "MemberExpression")) {
+  if (
+    isNodeOfType(current, "MemberExpression") ||
+    TRANSPARENT_EXPRESSION_WRAPPER_TYPES.has(current.type)
+  ) {
     return getCallExpr(ref, current.parent as EsTreeNode | undefined);
   }
   return null;
@@ -195,6 +257,9 @@ const unwrapUseCallback = (node: EsTreeNode | null | undefined): EsTreeNode | nu
   return isUseCallbackCallee ? node.arguments?.[0] : node;
 };
 
+export const hasParameterDefinition = (ref: Reference): boolean =>
+  Boolean(ref.resolved?.defs.some((definition) => definition.type === "Parameter"));
+
 // Resolves a reference to the function-like node its first definition
 // denotes, unwrapping a `const fn = () => {}` declarator and a
 // `const fn = useCallback(() => {}, [])` wrapper. Returns null
@@ -207,7 +272,13 @@ export const resolveToFunction = (
   | EsTreeNodeOfType<"FunctionExpression">
   | EsTreeNodeOfType<"FunctionDeclaration">
   | null => {
-  const definitionNode = ref.resolved?.defs[0]?.node as unknown as EsTreeNode | undefined;
+  const definition = ref.resolved?.defs[0];
+  // A `Parameter` def points its `node` at the ENCLOSING function that
+  // declares the parameter, not at a function bound to the parameter — the
+  // binding holds a value, not a callable. Resolving it would mistake plain
+  // data arguments (`setRow(row)`) for the updater/callback function.
+  if (!definition || hasParameterDefinition(ref)) return null;
+  const definitionNode = definition.node as unknown as EsTreeNode | undefined;
   if (!definitionNode) return null;
   if (isFunctionLike(definitionNode)) return definitionNode;
   if (isNodeOfType(definitionNode, "VariableDeclarator")) {
@@ -239,4 +310,22 @@ export const isEventualCallTo = (
     }
   });
   return callExprRefs.some(predicate);
+};
+
+// Like `isEventualCallTo`, but returns every matching call-site reference so
+// callers can inspect the matched call expressions (e.g. their arguments).
+export const getEventualCallRefsTo = (
+  analysis: ProgramAnalysis,
+  ref: Reference,
+  predicate: (ref: Reference) => boolean,
+): Reference[] => {
+  const callExprRefs: Reference[] = [];
+  ascend(analysis, ref, (upRef) => {
+    if (getCallExpr(upRef)) {
+      callExprRefs.push(upRef);
+    } else {
+      return false;
+    }
+  });
+  return callExprRefs.filter(predicate);
 };

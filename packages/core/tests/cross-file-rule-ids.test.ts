@@ -2,7 +2,11 @@ import * as fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as path from "node:path";
 import { describe, expect, it } from "vite-plus/test";
-import { CROSS_FILE_RULE_IDS } from "oxlint-plugin-react-doctor";
+import {
+  CROSS_FILE_DEPENDENCY_COLLECTORS,
+  CROSS_FILE_RULE_IDS,
+  UNBOUNDED_CROSS_FILE_RULE_IDS,
+} from "oxlint-plugin-react-doctor";
 
 // The staleness safety net. Reproduces the transitive import-graph analysis
 // that classifies a rule as cross-file (its verdict can depend on the content
@@ -26,21 +30,26 @@ const RULES_DIRECTORY = path.join(PLUGIN_SOURCE_DIRECTORY, "rules");
 // Primitives that read the content / existence of files OTHER than the one
 // being linted. A rule reaching any of these is cross-file. Project-config
 // readers (tsconfig) are included because resolving an alias walks to a real
-// source file via `resolve-relative-import-path`; `classify-package-platform`
-// (package.json) is the lone config-only reader, kept here so the lone rule
-// reaching it (`rn-prefer-expo-image`) is detected.
+// source file via `resolve-relative-import-path`; `read-nearest-package-manifest`
+// (package.json — reached through `classify-package-platform` and the
+// bundle-size package predicates) is the lone config-only reader, kept here
+// so the rules reaching it (`rn-prefer-expo-image`, `no-full-lodash-import`,
+// …) are detected.
 const CROSS_FILE_PRIMITIVE_FILES = [
+  "utils/build-source-project-index.ts",
   "utils/parse-source-file.ts",
   "utils/does-module-export-name.ts",
   "utils/has-ancestor-layout-matching.ts",
   "utils/resolve-cross-file-function-export.ts",
+  "utils/resolve-cross-file-export.ts",
   "utils/resolve-relative-import-path.ts",
   "utils/resolve-module-path.ts",
   "utils/resolve-barrel-export-file-path.ts",
   "utils/find-ancestor-suspense-layout.ts",
   "utils/find-ancestor-metadata-layout.ts",
   "utils/is-barrel-index-module.ts",
-  "utils/classify-package-platform.ts",
+  "utils/read-nearest-package-manifest.ts",
+  "utils/get-fast-refresh-file-status.ts",
 ].map((relativePath) => path.resolve(PLUGIN_SOURCE_DIRECTORY, relativePath));
 const primitiveFileSet = new Set(CROSS_FILE_PRIMITIVE_FILES);
 
@@ -115,7 +124,10 @@ const detectCrossFileRuleIds = (): Set<string> => {
     // Scan rules run via core's check-security-scan, never the oxlint config,
     // so they're irrelevant to the lint cache even if they read other files.
     if (/\bscan:\s*(?:\(|async)/.test(stripCommentsAndStrings(source))) continue;
-    if (reachesCrossFilePrimitive(path.resolve(ruleFile))) detected.add(ruleId);
+    const usesInkVersionGate = /\bminimumInkVersion\s*:/.test(stripCommentsAndStrings(source));
+    if (usesInkVersionGate || reachesCrossFilePrimitive(path.resolve(ruleFile))) {
+      detected.add(ruleId);
+    }
   }
   return detected;
 };
@@ -127,14 +139,125 @@ describe("CROSS_FILE_RULE_IDS", () => {
     expect(detected).toEqual(declared);
   });
 
-  it("contains the verified six and nothing the analysis can't justify", () => {
+  it("contains the verified set and nothing the analysis can't justify", () => {
     expect([...CROSS_FILE_RULE_IDS].sort()).toEqual([
+      "client-passive-event-listeners",
+      "exhaustive-deps",
+      "ink-ctrl-c-handler-requires-exit-option",
+      "ink-newline-inside-text",
+      "ink-no-bare-process-exit",
+      "ink-no-direct-raw-mode",
+      "ink-no-dom-host-elements",
+      "ink-no-dom-router",
+      "ink-no-focus-in-render",
+      "ink-no-layout-inside-text",
+      "ink-no-live-hooks-in-render-to-string",
+      "ink-no-measure-element-in-render",
+      "ink-no-multiple-static",
+      "ink-no-raw-text",
+      "ink-no-repeated-render",
+      "ink-prefer-use-animation",
+      "ink-prefer-use-paste",
+      "ink-static-is-append-only",
+      "ink-static-requires-key",
+      "ink-suspense-requires-concurrent",
+      "ink-use-reactive-window-size",
+      "ink-use-string-width-for-cursor",
+      "ink-use-suspend-terminal",
+      "ink-valid-aria-semantics",
+      "nextjs-async-dynamic-api-not-awaited",
       "nextjs-missing-metadata",
+      "nextjs-no-img-element",
       "nextjs-no-use-search-params-without-suspense",
+      "no-adjust-state-on-prop-change",
       "no-barrel-import",
+      "no-create-ref-in-function-component",
+      "no-derived-state",
+      "no-derived-state-effect",
+      "no-dynamic-import-path",
+      "no-effect-with-fresh-deps",
+      "no-event-handler",
+      "no-full-lodash-import",
+      "no-hydration-branch-on-browser-global",
+      "no-indeterminate-attribute",
+      "no-initialize-state",
+      "no-loading-flag-reset-outside-finally",
+      "no-locale-format-in-render",
+      "no-match-media-in-state-initializer",
       "no-mutating-reducer-state",
+      "no-unguarded-browser-global-at-module-scope",
+      "no-unguarded-browser-global-in-render-or-hook-init",
+      "only-export-components",
+      "prefer-dynamic-import",
+      "react-router-csp-nonce-consistency",
+      "react-router-descendant-routes-require-splat",
+      "react-router-guard-aborted-handle-error",
+      "react-router-internal-route-anchor",
+      "react-router-loader-fetch-forwards-signal",
+      "react-router-loader-parallel-fetch",
+      "react-router-nested-route-requires-outlet",
+      "react-router-no-catch-middleware-next",
+      "react-router-no-client-module-in-server-render",
+      "react-router-no-duplicate-route-id",
+      "react-router-no-empty-leaf-route",
+      "react-router-no-invalid-absolute-child-path",
+      "react-router-no-invalid-lazy-route-properties",
+      "react-router-no-invalid-splat-path",
+      "react-router-no-loader-request-body",
+      "react-router-no-middleware-response-body-consumption",
+      "react-router-no-multiple-blockers",
+      "react-router-no-multiple-middleware-next",
+      "react-router-no-multiple-set-search-params-in-tick",
+      "react-router-no-navigate-in-render",
+      "react-router-no-nested-router",
+      "react-router-no-redirect-in-try-catch",
+      "react-router-no-route-module-environment-suffix",
+      "react-router-no-router-in-render",
+      "react-router-no-session-mutation-in-loader",
+      "react-router-no-static-cookie-expires",
+      "react-router-no-unsynchronized-search-params-mutation",
+      "react-router-no-use-loader-data-in-error-ui",
+      "react-router-prefer-route-lazy",
+      "react-router-require-root-error-boundary",
+      "react-router-resource-link-requires-reload",
+      "react-router-return-navigation-promise-in-transition",
+      "react-router-server-middleware-return-response",
+      "react-router-session-mutation-requires-commit",
+      "react-router-v8-no-meta-data-field",
+      "react-router-v8-no-react-router-dom-import",
+      "react-router-v8-no-removed-future-flags",
+      "react-router-valid-route-object",
+      "remotion-calculate-metadata-fetch-signal",
+      "remotion-deterministic-randomness",
+      "remotion-no-css-animation",
+      "remotion-no-css-transition",
+      "remotion-no-css-url-assets",
+      "remotion-no-native-media-elements",
+      "remotion-no-next-image",
+      "rendering-hydration-mismatch-time",
+      "rerender-memo-with-default-value",
+      "rn-no-legacy-shadow-styles",
       "rn-no-raw-text",
       "rn-prefer-expo-image",
+      "rn-style-prefer-boxshadow",
+      "window-open-without-noopener",
     ]);
+  });
+
+  // The sidecar lint cache's classification guard: every cross-file rule must
+  // be CONSCIOUSLY classified as either fingerprint-BOUNDED (it ships a
+  // dependency collector, so its diagnostics can replay from the sidecar
+  // cache) or UNBOUNDED (no sound dependency bound exists — it re-lints every
+  // file on every scan). A new cross-file rule fails here until its author
+  // adds it to one side in the plugin's `cross-file-dependencies.ts`.
+  it("classifies every cross-file rule as bounded (collector) or unbounded — exactly one", () => {
+    const collectorRuleIds = [...CROSS_FILE_DEPENDENCY_COLLECTORS.keys()];
+    const overlappingRuleIds = collectorRuleIds.filter((ruleId) =>
+      UNBOUNDED_CROSS_FILE_RULE_IDS.has(ruleId),
+    );
+    expect(overlappingRuleIds).toEqual([]);
+    expect([...collectorRuleIds, ...UNBOUNDED_CROSS_FILE_RULE_IDS].sort()).toEqual(
+      [...CROSS_FILE_RULE_IDS].sort(),
+    );
   });
 });

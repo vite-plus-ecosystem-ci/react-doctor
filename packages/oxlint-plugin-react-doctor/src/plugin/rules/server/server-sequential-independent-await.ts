@@ -1,9 +1,11 @@
-import { collectPatternNames } from "../../utils/collect-pattern-names.js";
 import { defineRule } from "../../utils/define-rule.js";
+import { expressionReadsPatternBinding } from "../../utils/expression-reads-pattern-binding.js";
 import { getCalleeName } from "../../utils/get-callee-name.js";
+import { getOrderIndependentLocalFunction } from "../../utils/get-order-independent-local-function.js";
+import { hasPossibleStaticMemberCallWrite } from "../../utils/has-static-property-write-before.js";
+import { getImportedNameFromModule } from "../../utils/find-import-source-for-name.js";
 import { isAuthGuardName } from "../../utils/is-auth-guard-name.js";
 import { tokenizeIdentifierWords } from "../../utils/tokenize-identifier-words.js";
-import { walkAst } from "../../utils/walk-ast.js";
 import type { EsTreeNode } from "../../utils/es-tree-node.js";
 import type { RuleContext } from "../../utils/rule-context.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
@@ -19,15 +21,6 @@ import { isNodeOfType } from "../../utils/is-node-of-type.js";
 // where the second's initializer reads no identifier introduced by the
 // first declaration. We require both declarations to be at the top
 // level of the same block to keep precision high.
-const collectDeclaredNames = (declaration: EsTreeNode): Set<string> => {
-  const names = new Set<string>();
-  if (!isNodeOfType(declaration, "VariableDeclaration")) return names;
-  for (const declarator of declaration.declarations ?? []) {
-    collectPatternNames(declarator.id, names);
-  }
-  return names;
-};
-
 const declarationStartsWithAwait = (declaration: EsTreeNode): boolean => {
   if (!isNodeOfType(declaration, "VariableDeclaration")) return false;
   for (const declarator of declaration.declarations ?? []) {
@@ -41,18 +34,18 @@ const declarationStartsWithAwait = (declaration: EsTreeNode): boolean => {
 // b()` after `const { data } = await a()`) is a re-bind evaluated after
 // the await resolves, not a read of the first result — counting it would
 // miss the waterfall.
-const declarationReadsAnyName = (declaration: EsTreeNode, names: Set<string>): boolean => {
-  if (names.size === 0) return false;
+const declarationReadsAnyPatternBinding = (
+  declaration: EsTreeNode,
+  patterns: ReadonlyArray<EsTreeNode>,
+  context: RuleContext,
+): boolean => {
+  if (patterns.length === 0) return false;
   if (!isNodeOfType(declaration, "VariableDeclaration")) return false;
-  let didRead = false;
   for (const declarator of declaration.declarations ?? []) {
     if (!declarator.init) continue;
-    walkAst(declarator.init, (child: EsTreeNode) => {
-      if (didRead) return;
-      if (isNodeOfType(child, "Identifier") && names.has(child.name)) didRead = true;
-    });
+    if (expressionReadsPatternBinding(declarator.init, patterns, context.scopes)) return true;
   }
-  return didRead;
+  return false;
 };
 
 // Leading verbs that mark an await run for ordering / a side effect rather
@@ -79,45 +72,50 @@ const GATE_LEADING_VERBS = new Set([
   "authenticate",
 ]);
 
-// True when `name` is bound by an earlier statement in the same block to
-// a non-awaited expression — i.e. a promise that was *started* before
-// this await. `const p = fetchUser(); ... const user = await p;` is
-// already concurrent, so awaiting `p` is not a waterfall.
-const isStartedPromiseBinding = (
-  name: string,
-  statements: EsTreeNode[],
-  beforeIndex: number,
-): boolean => {
-  for (let index = 0; index < beforeIndex; index++) {
-    const statement = statements[index];
-    if (!isNodeOfType(statement, "VariableDeclaration")) continue;
-    for (const declarator of statement.declarations ?? []) {
-      if (!isNodeOfType(declarator.id, "Identifier")) continue;
-      if (declarator.id.name !== name) continue;
-      if (declarator.init && !isNodeOfType(declarator.init, "AwaitExpression")) return true;
-    }
-  }
-  return false;
-};
-
-// True when the declaration awaits a bare Identifier that was started as
-// a promise earlier in the same block (`await postsPromise`). Such an
-// await is already running concurrently, so it is not the second leg of
-// a waterfall.
-const declarationAwaitsStartedPromise = (
-  declaration: EsTreeNode,
-  statements: EsTreeNode[],
-  declarationIndex: number,
-): boolean => {
+// True when the declaration awaits an already-existing promise value
+// rather than starting new work — a bare Identifier (`await postsPromise`)
+// or a member read (`await props.params` in Next.js 15). The promise was
+// created before this statement ran, so the await is not the second leg
+// of a waterfall.
+const declarationAwaitsExistingPromise = (declaration: EsTreeNode): boolean => {
   if (!isNodeOfType(declaration, "VariableDeclaration")) return false;
   for (const declarator of declaration.declarations ?? []) {
     const init = declarator.init;
     if (!isNodeOfType(init, "AwaitExpression")) continue;
     const argument = init.argument;
-    if (
-      isNodeOfType(argument, "Identifier") &&
-      isStartedPromiseBinding(argument.name, statements, declarationIndex)
-    ) {
+    if (isNodeOfType(argument, "Identifier") || isNodeOfType(argument, "MemberExpression")) {
+      return true;
+    }
+  }
+  return false;
+};
+
+// Next.js request-scoped async APIs (`headers()`, `cookies()`,
+// `draftMode()`, `connection()`) and next-intl's server helpers
+// (`getTranslations()`, `getMessages()`, …) resolve from the ambient
+// request context, not the network — wrapping them in `Promise.all`
+// saves nothing.
+const REQUEST_SCOPED_IMPORT_SOURCES = ["next/headers", "next-intl/server"];
+
+const isRequestScopedCallee = (callee: EsTreeNode): boolean => {
+  if (!isNodeOfType(callee, "Identifier")) return false;
+  if (
+    REQUEST_SCOPED_IMPORT_SOURCES.some(
+      (moduleSource) => getImportedNameFromModule(callee, callee.name, moduleSource) !== null,
+    )
+  ) {
+    return true;
+  }
+  return getImportedNameFromModule(callee, callee.name, "next/server") === "connection";
+};
+
+const declarationAwaitsRequestScopedCall = (declaration: EsTreeNode): boolean => {
+  if (!isNodeOfType(declaration, "VariableDeclaration")) return false;
+  for (const declarator of declaration.declarations ?? []) {
+    const init = declarator.init;
+    if (!isNodeOfType(init, "AwaitExpression")) continue;
+    const argument = init.argument;
+    if (isNodeOfType(argument, "CallExpression") && isRequestScopedCallee(argument.callee)) {
       return true;
     }
   }
@@ -127,7 +125,7 @@ const declarationAwaitsStartedPromise = (
 // True when the first declaration awaits a guard / side-effect gate, so its
 // ordering before the next await is intentional (`await requireSession()`,
 // `await db.connect()`, `await beginTransaction()`).
-const declarationAwaitsGate = (declaration: EsTreeNode): boolean => {
+const declarationAwaitsGate = (declaration: EsTreeNode, context: RuleContext): boolean => {
   if (!isNodeOfType(declaration, "VariableDeclaration")) return false;
   for (const declarator of declaration.declarations ?? []) {
     if (!isNodeOfType(declarator.init, "AwaitExpression")) continue;
@@ -136,6 +134,8 @@ const declarationAwaitsGate = (declaration: EsTreeNode): boolean => {
     // resolves NewExpression, which would over-suppress here).
     const argument = declarator.init.argument;
     if (!isNodeOfType(argument, "CallExpression")) continue;
+    if (hasPossibleStaticMemberCallWrite(argument, context.scopes)) return true;
+    if (getOrderIndependentLocalFunction(argument, context.scopes) !== null) continue;
     const calleeName = getCalleeName(argument);
     if (!calleeName) continue;
     if (isAuthGuardName(calleeName)) return true;
@@ -158,22 +158,30 @@ export const serverSequentialIndependentAwait = defineRule({
         const currentStatement = statements[statementIndex];
         if (!isNodeOfType(currentStatement, "VariableDeclaration")) continue;
         if (!declarationStartsWithAwait(currentStatement)) continue;
-        const declaredNames = collectDeclaredNames(currentStatement);
+        const declaredPatterns = currentStatement.declarations.map((declarator) => declarator.id);
 
         const nextStatement = statements[statementIndex + 1];
         if (!isNodeOfType(nextStatement, "VariableDeclaration")) continue;
         if (!declarationStartsWithAwait(nextStatement)) continue;
 
-        if (declarationReadsAnyName(nextStatement, declaredNames)) continue;
-        // The second await is on a promise started earlier in the block
-        // (`const p = fetchPosts(); … const posts = await p;`) — already
-        // concurrent, so there's no waterfall to flatten.
-        if (declarationAwaitsStartedPromise(nextStatement, statements, statementIndex + 1))
+        if (declarationReadsAnyPatternBinding(nextStatement, declaredPatterns, context)) continue;
+        // The second await is on a promise that already exists
+        // (`const p = fetchPosts(); … const posts = await p;`,
+        // `await props.params`) — already running, so there's no
+        // waterfall to flatten.
+        if (declarationAwaitsExistingPromise(nextStatement)) continue;
+        // A request-scoped API (`await headers()`, `await getTranslations()`)
+        // resolves from the ambient request context, not the network, so
+        // pairing it with a real fetch is not a waterfall.
+        if (
+          declarationAwaitsRequestScopedCall(currentStatement) ||
+          declarationAwaitsRequestScopedCall(nextStatement)
+        )
           continue;
         // A guard / side-effect gate (`await requireSession()`, `db.connect()`)
         // must run before the next await — its ordering is intentional, not a
         // parallelizable waterfall.
-        if (declarationAwaitsGate(currentStatement)) continue;
+        if (declarationAwaitsGate(currentStatement, context)) continue;
 
         context.report({
           node: nextStatement,

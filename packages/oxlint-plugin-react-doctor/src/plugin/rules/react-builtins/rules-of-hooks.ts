@@ -5,10 +5,34 @@ import type { EsTreeNodeOfType } from "../../utils/es-tree-node-of-type.js";
 import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { isReactComponentOrHookName } from "../../utils/is-react-component-or-hook-name.js";
 import { isReactHookName } from "../../utils/is-react-hook-name.js";
-import { REACT_HOC_NAMES } from "../../constants/react.js";
+import {
+  REACT_ECOSYSTEM_PACKAGE_NAMES,
+  REACT_HOC_NAMES,
+  REACT_RUNTIME_MODULE_SOURCES,
+} from "../../constants/react.js";
+import {
+  getImportBindingForName,
+  getImportSourceForName,
+} from "../../utils/find-import-source-for-name.js";
 import { isFunctionLike } from "../../utils/is-function-like.js";
+import { isNonReactEffectEventCallee } from "../../utils/is-non-react-effect-event-callee.js";
+import { isNodeConditionallyExecuted } from "../../utils/is-node-conditionally-executed.js";
+import { symbolHasReactUseEffectEventOrigin } from "../../utils/symbol-has-react-use-effect-event-origin.js";
 import { isReactHocCallbackArgument } from "../../utils/is-react-hoc-callback-argument.js";
+import { getImportedName } from "../../utils/get-imported-name.js";
+import { getDestructuredBindingPropertyName } from "../../utils/get-destructured-binding-property-name.js";
+import { getStaticPropertyName } from "../../utils/get-static-property-name.js";
+import {
+  hasPossibleStaticPropertyMutationOrEscape,
+  hasPossibleStaticPropertyWriteBefore,
+} from "../../utils/has-static-property-write-before.js";
+import { hasSymbolWriteBefore } from "../../utils/has-symbol-write-before.js";
+import { isReactNamespaceImport } from "../../utils/is-react-api-call.js";
+import { resolveImportedApiReference } from "../../utils/resolve-imported-api-reference.js";
+import { statementAlwaysExits } from "../../utils/statement-always-exits.js";
+import { stripParenExpression } from "../../utils/strip-paren-expression.js";
 import { walkAst } from "../../utils/walk-ast.js";
+import { isRulesOfHooksSuppressedAt } from "./rules-of-hooks-suppression.js";
 
 // Port of `oxc_linter::rules::react::rules_of_hooks`. Enforces React's
 // Rules of Hooks:
@@ -67,6 +91,23 @@ const EFFECT_HOOK_NAMES: ReadonlySet<string> = new Set([
 const isPascalCaseIdentifier = (identifier: EsTreeNodeOfType<"Identifier">): boolean => {
   const firstCharCode = identifier.name.charCodeAt(0);
   return firstCharCode >= ASCII_UPPERCASE_A && firstCharCode <= ASCII_UPPERCASE_Z;
+};
+
+// `_Calendar` / `__Menu` — the "private component exported under a public
+// alias" convention (`const _Calendar = ...; export { _Calendar as Calendar }`)
+// is a real component whose name just fails the PascalCase first-letter check.
+// Underscore-prefixed HOOK names (`_useNotAHook`) deliberately do NOT qualify:
+// upstream treats them as non-hooks and so do we. The relaxation only applies
+// to functions that own their name DIRECTLY (declaration id / variable
+// binding) — a callback argument inheriting the binding's name through a
+// wrapper call (`memo(render, comparator)` naming the comparator
+// `_Memoized`) is not the component itself.
+const UNDERSCORE_PREFIXED_COMPONENT_NAME_PATTERN = /^_+[A-Z]/;
+
+const isComponentOrHookDisplayName = (name: string, functionNode: EsTreeNode): boolean => {
+  if (isReactComponentOrHookName(name)) return true;
+  if (!UNDERSCORE_PREFIXED_COMPONENT_NAME_PATTERN.test(name)) return false;
+  return !isNodeOfType(functionNode.parent, "CallExpression");
 };
 
 const buildAdditionalEffectHooksRegex = (additionalEffectHooks: string): RegExp | null => {
@@ -172,8 +213,9 @@ const isHookCall = (
     isNodeOfType(callee.property, "Identifier") &&
     isReactHookName(callee.property.name)
   ) {
-    const callObject = callee.object;
+    const callObject = stripParenExpression(callee.object);
     const propertyName = callee.property.name;
+    if (isPackageImportedNonReactHookMemberCallee(call, scopes)) return null;
     // Upstream's heuristic: a use-prefixed member call IS a hook iff
     // the object reads like a "namespace" — PascalCase identifier
     // (`Hook` / `This` / `Super` / `React` / `FooStore` / `Namespace`)
@@ -183,6 +225,18 @@ const isHookCall = (
     if (isNodeOfType(callObject, "Identifier")) {
       if (settings.allowedPascalCaseHookNamespaces.includes(callObject.name)) return null;
       if (!isPascalCaseIdentifier(callObject)) return null;
+      // `X.use([plugins])` is the plugin-registration idiom
+      // (`SwiperCore.use([Navigation, Pagination])`) — `.use` is the
+      // ecosystem's registration verb, and React 19's `use(...)` never
+      // takes an array literal (it takes a promise or a context). Bare
+      // `Hook.use()` stays a hook to match upstream's fixtures.
+      if (
+        propertyName === "use" &&
+        callObject.name !== "React" &&
+        isNodeOfType(call.arguments[0], "ArrayExpression")
+      ) {
+        return null;
+      }
       return { hookName: propertyName };
     }
     // Chained-call hooks (`<callExpr>.useFoo(...)`) are vanishingly
@@ -331,6 +385,176 @@ const inferDestructureSourceKey = (bindingIdentifier: EsTreeNode): string | null
 // component / custom hook scope.
 const isReactUseHook = (hookName: string): boolean => hookName === "use";
 
+const isReactHookCapabilityValue = (
+  expression: EsTreeNode,
+  scopes: ScopeAnalysis,
+  visitedSymbolIds: Set<number> = new Set(),
+): boolean => {
+  const unwrappedExpression = stripParenExpression(expression);
+  if (isNodeOfType(unwrappedExpression, "Identifier")) {
+    const symbol = scopes.symbolFor(unwrappedExpression);
+    if (!symbol || visitedSymbolIds.has(symbol.id)) return false;
+    visitedSymbolIds.add(symbol.id);
+    if (symbol.kind === "import") {
+      return (
+        isReactImport(symbol) && isReactHookName(getImportedName(symbol.declarationNode) ?? "")
+      );
+    }
+    if (
+      symbol.kind !== "const" ||
+      !symbol.initializer ||
+      !isNodeOfType(symbol.declarationNode, "VariableDeclarator")
+    ) {
+      return false;
+    }
+    const destructuredPropertyName = getDestructuredBindingPropertyName(symbol.bindingIdentifier);
+    if (destructuredPropertyName) {
+      const namespaceExpression = stripParenExpression(symbol.initializer);
+      return (
+        isReactHookName(destructuredPropertyName) &&
+        isNodeOfType(namespaceExpression, "Identifier") &&
+        isReactNamespaceImport(namespaceExpression, scopes) &&
+        !hasPossibleStaticPropertyMutationOrEscape(
+          namespaceExpression,
+          destructuredPropertyName,
+          scopes,
+        )
+      );
+    }
+    if (symbol.declarationNode.id !== symbol.bindingIdentifier) return false;
+    return isReactHookCapabilityValue(symbol.initializer, scopes, visitedSymbolIds);
+  }
+  if (!isNodeOfType(unwrappedExpression, "MemberExpression")) return false;
+  const propertyName = getStaticPropertyName(unwrappedExpression);
+  if (!propertyName || !isReactHookName(propertyName)) return false;
+  const namespaceExpression = stripParenExpression(unwrappedExpression.object);
+  return (
+    isNodeOfType(namespaceExpression, "Identifier") &&
+    isReactNamespaceImport(namespaceExpression, scopes) &&
+    !hasPossibleStaticPropertyMutationOrEscape(namespaceExpression, propertyName, scopes)
+  );
+};
+
+const isReactHookCapabilityComparisonOperand = (
+  expression: EsTreeNode,
+  scopes: ScopeAnalysis,
+): boolean => {
+  const unwrappedExpression = stripParenExpression(expression);
+  if (isReactHookCapabilityValue(unwrappedExpression, scopes)) return true;
+  return (
+    isNodeOfType(unwrappedExpression, "UnaryExpression") &&
+    unwrappedExpression.operator === "typeof" &&
+    isReactHookCapabilityValue(unwrappedExpression.argument, scopes)
+  );
+};
+
+const isStaticCapabilityComparisonValue = (
+  expression: EsTreeNode,
+  scopes: ScopeAnalysis,
+): boolean => {
+  const unwrappedExpression = stripParenExpression(expression);
+  if (isNodeOfType(unwrappedExpression, "Literal")) return true;
+  return (
+    isNodeOfType(unwrappedExpression, "Identifier") &&
+    unwrappedExpression.name === "undefined" &&
+    scopes.isGlobalReference(unwrappedExpression)
+  );
+};
+
+const CAPABILITY_COMPARISON_OPERATORS: ReadonlySet<string> = new Set(["==", "!=", "===", "!=="]);
+
+const isInvariantReactHookCapabilityCondition = (
+  expression: EsTreeNode,
+  scopes: ScopeAnalysis,
+): boolean => {
+  const unwrappedExpression = stripParenExpression(expression);
+  if (isReactHookCapabilityValue(unwrappedExpression, scopes)) return true;
+  if (
+    isNodeOfType(unwrappedExpression, "UnaryExpression") &&
+    unwrappedExpression.operator === "!"
+  ) {
+    return isInvariantReactHookCapabilityCondition(unwrappedExpression.argument, scopes);
+  }
+  if (isNodeOfType(unwrappedExpression, "LogicalExpression")) {
+    return (
+      isInvariantReactHookCapabilityCondition(unwrappedExpression.left, scopes) &&
+      isInvariantReactHookCapabilityCondition(unwrappedExpression.right, scopes)
+    );
+  }
+  if (
+    !isNodeOfType(unwrappedExpression, "BinaryExpression") ||
+    !CAPABILITY_COMPARISON_OPERATORS.has(unwrappedExpression.operator)
+  ) {
+    return false;
+  }
+  return (
+    (isReactHookCapabilityComparisonOperand(unwrappedExpression.left, scopes) &&
+      isStaticCapabilityComparisonValue(unwrappedExpression.right, scopes)) ||
+    (isReactHookCapabilityComparisonOperand(unwrappedExpression.right, scopes) &&
+      isStaticCapabilityComparisonValue(unwrappedExpression.left, scopes))
+  );
+};
+
+const statementContainsOwnAbruptCompletion = (statement: EsTreeNode): boolean => {
+  let doesContainAbruptCompletion = false;
+  walkAst(statement, (child) => {
+    if (child !== statement && isFunctionLike(child)) return false;
+    if (isNodeOfType(child, "ReturnStatement") || isNodeOfType(child, "ThrowStatement")) {
+      doesContainAbruptCompletion = true;
+      return false;
+    }
+  });
+  return doesContainAbruptCompletion;
+};
+
+const isInvariantReactHookCapabilityExit = (
+  statement: EsTreeNode,
+  scopes: ScopeAnalysis,
+): boolean =>
+  isNodeOfType(statement, "IfStatement") &&
+  statement.alternate === null &&
+  statementAlwaysExits(statement.consequent) &&
+  isInvariantReactHookCapabilityCondition(statement.test, scopes);
+
+const isAfterOnlyInvariantReactHookCapabilityExits = (
+  node: EsTreeNode,
+  enclosingFunction: EsTreeNode,
+  scopes: ScopeAnalysis,
+): boolean => {
+  if (
+    !isFunctionLike(enclosingFunction) ||
+    !isNodeOfType(enclosingFunction.body, "BlockStatement")
+  ) {
+    return false;
+  }
+  let containingStatement = node;
+  while (containingStatement.parent && containingStatement.parent !== enclosingFunction.body) {
+    if (isFunctionLike(containingStatement.parent)) return false;
+    if (
+      isNodeOfType(containingStatement.parent, "IfStatement") ||
+      isNodeOfType(containingStatement.parent, "SwitchStatement") ||
+      isNodeOfType(containingStatement.parent, "SwitchCase") ||
+      isNodeOfType(containingStatement.parent, "ConditionalExpression") ||
+      isNodeOfType(containingStatement.parent, "LogicalExpression")
+    ) {
+      return false;
+    }
+    containingStatement = containingStatement.parent;
+  }
+  if (containingStatement.parent !== enclosingFunction.body) return false;
+  const statementIndex = enclosingFunction.body.body.findIndex(
+    (statement) => statement === containingStatement,
+  );
+  if (statementIndex <= 0) return false;
+  const bypassingStatements = enclosingFunction.body.body
+    .slice(0, statementIndex)
+    .filter((statement) => statementContainsOwnAbruptCompletion(statement));
+  return (
+    bypassingStatements.length > 0 &&
+    bypassingStatements.every((statement) => isInvariantReactHookCapabilityExit(statement, scopes))
+  );
+};
+
 interface FunctionInfo {
   node: EsTreeNode;
   // The name we'd display in error messages. Best-effort: the
@@ -468,6 +692,7 @@ const MIN_HOOK_CALLS_FOR_RENDER_SCOPE = 2;
 // (`handleClick`, `fetchData`) must NOT qualify — otherwise any
 // module function with two copy-pasted hooks becomes exempt.
 const RENDER_SCOPE_FACTORY_NAME_PATTERN = /^_?(?:init|create|make|build)(?:[A-Z0-9_]|$)/;
+const HOOK_NAMESPACE_NAME_PATTERN = /Hooks?$/;
 
 // A use-prefixed callee that scope analysis resolves to a LOCAL
 // function whose own body issues zero hook calls is not a React hook
@@ -491,6 +716,94 @@ const isLocalNonHookFunctionCallee = (
   return countOwnScopeHookCalls(localFunction, scopes, settings, countedFunctionNodes) === 0;
 };
 
+// Path-alias prefixes (`@/`, `~/`) resolve to project-local files, which
+// are as likely to hold genuine React hooks as relative imports are.
+const PATH_ALIAS_IMPORT_PATTERN = /^[@~]\//;
+
+// Bare package name of an import specifier: `@tanstack/react-query/foo`
+// → `@tanstack/react-query`, `next/navigation` → `next`.
+const getPackageNameFromImportSource = (importSource: string): string => {
+  const pathSegments = importSource.split("/");
+  return importSource.startsWith("@")
+    ? pathSegments.slice(0, 2).join("/")
+    : (pathSegments[0] ?? importSource);
+};
+
+// A use* export from one of these sources is a REAL React hook the rule
+// must keep enforcing: the React runtimes themselves, anything whose
+// specifier carries "react" (react-redux, @tanstack/react-query,
+// react-hook-form, react-router, preact), or a known React-ecosystem
+// package that doesn't self-identify by name (next, swr, zustand, …).
+const isReactEcosystemImportSource = (importSource: string): boolean =>
+  REACT_RUNTIME_MODULE_SOURCES.has(importSource) ||
+  importSource.toLowerCase().includes("react") ||
+  REACT_ECOSYSTEM_PACKAGE_NAMES.has(getPackageNameFromImportSource(importSource));
+
+// A use*-named function imported from a third-party PACKAGE that is not
+// React-ecosystem — WebdriverIO's `useBrowser` from
+// `@cloudscape-design/browser-test-tools/use-browser`, DI/middleware
+// helpers, codegen utilities. These follow the use* naming convention
+// without being React hooks, so "called outside a component" reports on
+// them are noise. Relative / path-alias imports stay eligible — a
+// project's own `./useFoo` is usually a real hook — and so do imports
+// from React-ecosystem packages (`useSelector` from react-redux at
+// module top level is a genuine Rules-of-Hooks violation).
+const isPackageImportedNonReactHookCallee = (call: EsTreeNodeOfType<"CallExpression">): boolean => {
+  const callee = call.callee;
+  if (!isNodeOfType(callee, "Identifier")) return false;
+  const importSource = getImportSourceForName(call, callee.name);
+  if (importSource === null) return false;
+  if (importSource.startsWith(".")) return false;
+  if (PATH_ALIAS_IMPORT_PATTERN.test(importSource)) return false;
+  return !isReactEcosystemImportSource(importSource);
+};
+
+const isPackageImportedNonReactHookMemberCallee = (
+  call: EsTreeNodeOfType<"CallExpression">,
+  scopes: ScopeAnalysis,
+): boolean => {
+  const callee = call.callee;
+  if (!isNodeOfType(callee, "MemberExpression")) return false;
+  const propertyName = getStaticPropertyName(callee);
+  if (!propertyName || !isReactHookName(propertyName)) return false;
+  const receiver = stripParenExpression(callee.object);
+  if (!isNodeOfType(receiver, "Identifier")) return false;
+  const receiverSymbol = scopes.symbolFor(receiver);
+  if (!receiverSymbol || hasSymbolWriteBefore(receiverSymbol, call, scopes)) return false;
+  if (hasPossibleStaticPropertyWriteBefore(receiver, propertyName, call, scopes)) return false;
+  const importedReceiver = resolveImportedApiReference(receiver, scopes);
+  if (!importedReceiver) return false;
+  if (importedReceiver.source.startsWith(".")) return false;
+  if (PATH_ALIAS_IMPORT_PATTERN.test(importedReceiver.source)) return false;
+  return !isReactEcosystemImportSource(importedReceiver.source);
+};
+
+const isDefaultImportedClassApiMemberCallee = (
+  call: EsTreeNodeOfType<"CallExpression">,
+): boolean => {
+  const callee = call.callee;
+  if (!isNodeOfType(callee, "MemberExpression")) return false;
+  if (!isNodeOfType(callee.object, "Identifier")) return false;
+  if (HOOK_NAMESPACE_NAME_PATTERN.test(callee.object.name)) return false;
+  const importBinding = getImportBindingForName(call, callee.object.name);
+  if (!importBinding || importBinding.exportedName !== "default") return false;
+  return !REACT_RUNTIME_MODULE_SOURCES.has(importBinding.source);
+};
+
+// `useMDXComponents` is the MDX/Next.js convention name for a
+// components-map getter (`mdx-components.tsx`): when the project owns it
+// (relative or path-alias import), it is a plain function that merely
+// borrows the `use` prefix — Next.js documents calling it from async
+// Server Components. Imports from React-ecosystem packages (e.g.
+// @mdx-js/react, whose implementation calls useContext) keep firing.
+const isProjectOwnedMdxComponentsGetter = (call: EsTreeNodeOfType<"CallExpression">): boolean => {
+  const callee = call.callee;
+  if (!isNodeOfType(callee, "Identifier") || callee.name !== "useMDXComponents") return false;
+  const importSource = getImportSourceForName(call, callee.name);
+  if (importSource === null) return false;
+  return importSource.startsWith(".") || PATH_ALIAS_IMPORT_PATTERN.test(importSource);
+};
+
 const findEnclosingFunctionInfo = (node: EsTreeNode): FunctionInfo | null => {
   let current: EsTreeNode | null | undefined = node.parent;
   while (current) {
@@ -508,7 +821,7 @@ const findEnclosingFunctionInfo = (node: EsTreeNode): FunctionInfo | null => {
         isAsync: Boolean(current.async),
         isComponentOrHook:
           isReactHocCallbackArgument(current) ||
-          (resolvedName === null ? false : isReactComponentOrHookName(displayName)),
+          (resolvedName === null ? false : isComponentOrHookDisplayName(displayName, current)),
       };
     }
     current = current.parent ?? null;
@@ -544,50 +857,6 @@ const isInsideClassComponent = (node: EsTreeNode): boolean => {
   return false;
 };
 
-// True if any AST ancestor between `descendant` (exclusive) and
-// `ancestor` (exclusive) is a conditional / short-circuit expression
-// whose right-hand side encloses `descendant`.
-const hasShortCircuitAncestor = (descendant: EsTreeNode, ancestor: EsTreeNode): boolean => {
-  let current: EsTreeNode | null | undefined = descendant.parent;
-  while (current && current !== ancestor) {
-    if (isNodeOfType(current, "ConditionalExpression")) return true;
-    if (
-      isNodeOfType(current, "LogicalExpression") &&
-      (current.operator === "&&" || current.operator === "||" || current.operator === "??") &&
-      isWithinRange(descendant, current.right)
-    ) {
-      return true;
-    }
-    current = current.parent ?? null;
-  }
-  return false;
-};
-
-interface NodeWithRange {
-  start?: number;
-  end?: number;
-}
-
-// HACK: walking the AST back from a parent into its own children to
-// find which side an expression sits on is awkward. Compare the start
-// / end ranges instead — a node is "within" a sibling's range iff its
-// span fits inside.
-const isWithinRange = (descendant: EsTreeNode, sibling: EsTreeNode): boolean => {
-  const descendantSpan = descendant as NodeWithRange;
-  const siblingSpan = sibling as NodeWithRange;
-  if (
-    typeof descendantSpan.start !== "number" ||
-    typeof siblingSpan.start !== "number" ||
-    typeof siblingSpan.end !== "number"
-  ) {
-    return false;
-  }
-  return (
-    descendantSpan.start >= siblingSpan.start &&
-    (descendantSpan.end ?? siblingSpan.end) <= siblingSpan.end
-  );
-};
-
 const isInsideTry = (descendant: EsTreeNode, ancestor: EsTreeNode): boolean => {
   let current: EsTreeNode | null | undefined = descendant.parent;
   while (current && current !== ancestor) {
@@ -614,19 +883,15 @@ const isInsideLoop = (descendant: EsTreeNode, ancestor: EsTreeNode): boolean => 
   return false;
 };
 
-const isUseEffectEventSymbol = (symbol: SymbolDescriptor): boolean => {
-  const initializer = symbol.initializer;
-  if (!initializer || !isNodeOfType(initializer, "CallExpression")) return false;
-  return getHookNameFromCallee(initializer.callee) === "useEffectEvent";
-};
-
 const findEnclosingComponentOrHookFunction = (node: EsTreeNode): EsTreeNode | null => {
   let current: EsTreeNode | null | undefined = node.parent;
   while (current) {
     if (isFunctionLike(current)) {
       if (isReactHocCallbackArgument(current)) return current;
       const resolvedName = inferFunctionName(current);
-      if (resolvedName !== null && isReactComponentOrHookName(resolvedName)) return current;
+      if (resolvedName !== null && isComponentOrHookDisplayName(resolvedName, current)) {
+        return current;
+      }
     }
     current = current.parent ?? null;
   }
@@ -703,7 +968,33 @@ export const rulesOfHooks = defineRule({
   recommendation:
     "Call hooks at the top level of a React function component or custom Hook so React sees the same hook order on every render.",
   category: "Correctness",
-  create: (context) => {
+  create: (hostContext) => {
+    const nodeStartOffset = (node: EsTreeNode): number | null => {
+      const nodeWithOffsets = node as { start?: number; range?: [number, number] };
+      if (typeof nodeWithOffsets.start === "number") return nodeWithOffsets.start;
+      if (Array.isArray(nodeWithOffsets.range)) return nodeWithOffsets.range[0];
+      return null;
+    };
+    const context: typeof hostContext = {
+      get filename() {
+        return hostContext.filename;
+      },
+      get settings() {
+        return hostContext.settings;
+      },
+      get scopes() {
+        return hostContext.scopes;
+      },
+      get cfg() {
+        return hostContext.cfg;
+      },
+      report: (descriptor) => {
+        if (isRulesOfHooksSuppressedAt(hostContext.filename, nodeStartOffset(descriptor.node))) {
+          return;
+        }
+        hostContext.report(descriptor);
+      },
+    };
     const settings = resolveSettings(context.settings);
     const additionalEffectHooksRegex = buildAdditionalEffectHooksRegex(
       settings.additionalEffectHooks,
@@ -714,19 +1005,38 @@ export const rulesOfHooks = defineRule({
         if (!hookContext) return;
         const { hookName } = hookContext;
 
-        if (hookName === "useEffectEvent" && !isUseEffectEventInitializer(node)) {
+        if (
+          hookName === "useEffectEvent" &&
+          !isUseEffectEventInitializer(node) &&
+          !isNonReactEffectEventCallee(node.callee, node, context.scopes)
+        ) {
           context.report({ node: node.callee, message: buildEffectEventPassedDownMessage() });
           return;
         }
 
+        // A use*-named callee that resolves to a LOCAL function whose body
+        // issues zero hook calls is not a React hook at all (`usePlugin`
+        // async apply helpers, `usePromptExample` event handlers) — none of
+        // the ordering rules apply to it.
+        if (isLocalNonHookFunctionCallee(node, context.scopes, settings)) return;
+
+        if (isProjectOwnedMdxComponentsGetter(node)) return;
+
         const enclosing = findEnclosingFunctionInfo(node);
 
         if (!enclosing) {
+          if (isPackageImportedNonReactHookCallee(node)) return;
           context.report({ node: node.callee, message: buildTopLevelMessage(hookName) });
           return;
         }
 
         if (isInsideClassComponent(node)) {
+          if (
+            isPackageImportedNonReactHookCallee(node) ||
+            isDefaultImportedClassApiMemberCallee(node)
+          ) {
+            return;
+          }
           context.report({ node: node.callee, message: buildClassComponentMessage(hookName) });
           return;
         }
@@ -768,7 +1078,8 @@ export const rulesOfHooks = defineRule({
             if (parentInfo.isComponentOrHook) isInsideComponentOrHook = true;
           }
           if (!isInsideComponentOrHook) {
-            if (isLocalNonHookFunctionCallee(node, context.scopes, settings)) return;
+            if (!enclosing.hasResolvedName) return;
+            if (isPackageImportedNonReactHookCallee(node)) return;
             context.report({
               node: node.callee,
               message: buildNonComponentMessage(hookName, enclosing.name),
@@ -807,7 +1118,7 @@ export const rulesOfHooks = defineRule({
             return;
           }
 
-          if (isLocalNonHookFunctionCallee(node, context.scopes, settings)) return;
+          if (isPackageImportedNonReactHookCallee(node)) return;
           context.report({
             node: node.callee,
             message: buildNonComponentMessage(hookName, enclosing.name),
@@ -825,14 +1136,17 @@ export const rulesOfHooks = defineRule({
           return;
         }
 
-        if (hasShortCircuitAncestor(node, enclosing.node)) {
+        if (isNodeConditionallyExecuted(node, enclosing.node)) {
           context.report({ node: node.callee, message: buildConditionalMessage(hookName) });
           return;
         }
 
         // CFG-based check: catches early-return patterns and
         // if-statement bodies.
-        if (!context.cfg.isUnconditionalFromEntry(node)) {
+        if (
+          !context.cfg.isUnconditionalFromEntry(node) &&
+          !isAfterOnlyInvariantReactHookCapabilityExits(node, enclosing.node, context.scopes)
+        ) {
           context.report({ node: node.callee, message: buildConditionalMessage(hookName) });
         }
       },
@@ -840,7 +1154,7 @@ export const rulesOfHooks = defineRule({
       Identifier(node: EsTreeNodeOfType<"Identifier">) {
         const reference = context.scopes.referenceFor(node);
         const symbol = reference?.resolvedSymbol;
-        if (!symbol || !isUseEffectEventSymbol(symbol)) return;
+        if (!symbol || !symbolHasReactUseEffectEventOrigin(symbol, context.scopes)) return;
         if (!isSameComponentOrHookScope(symbol, node)) return;
         if (isInsideAllowedEffectEventCallback(node, additionalEffectHooksRegex)) return;
 

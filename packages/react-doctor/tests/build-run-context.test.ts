@@ -63,6 +63,11 @@ describe("buildRunContext", () => {
     expect(buildRunContext().nodeMajor).toBe(expectedMajor);
   });
 
+  it("records the focused design command separately from a general inspection", () => {
+    process.argv = ["node", "react-doctor", "design", ".", "--verbose"];
+    expect(buildRunContext().command).toBe("design");
+  });
+
   it("scrubs the OS username out of cwd (home directory replaced with ~)", () => {
     const { cwd } = buildRunContext();
     expect(cwd).not.toContain(os.homedir());
@@ -96,10 +101,10 @@ describe("buildRunContext", () => {
     expect(context.viaAction).toBe(false);
   });
 
-  it("defaults lintBatchOrdering to 'arrival' and honors the cost override", () => {
-    expect(buildRunContext().lintBatchOrdering).toBe("arrival");
-
-    process.env.REACT_DOCTOR_LINT_BATCH_ORDERING = "cost";
+  it("defaults lintBatchOrdering to 'cost' and honors the arrival rollback", () => {
     expect(buildRunContext().lintBatchOrdering).toBe("cost");
+
+    process.env.REACT_DOCTOR_LINT_BATCH_ORDERING = "arrival";
+    expect(buildRunContext().lintBatchOrdering).toBe("arrival");
   });
 });

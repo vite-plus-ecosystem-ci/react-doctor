@@ -9,6 +9,12 @@ interface UpstreamCase {
   name: string;
   code: string;
   todo: boolean;
+  /**
+   * Set when react-doctor deliberately diverges from the upstream verdict
+   * (with the corpus evidence for why). Skipped like `todo`, but the flag
+   * documents that the divergence is a decision, not a gap.
+   */
+  divergence?: string;
   errors?: number;
 }
 
@@ -54,6 +60,7 @@ export interface RunUpstreamParityOptions {
    * `recommended` config and asserts no diagnostics.
    */
   assertNoneOfPortedRules?: boolean;
+  reactMajorVersion?: number;
 }
 
 const PORTED_RULE_IDS: ReadonlyArray<string> = [
@@ -69,10 +76,15 @@ const PORTED_RULE_IDS: ReadonlyArray<string> = [
 
 const collectAnyPortedRuleHits = async (
   projectDir: string,
+  reactMajorVersion?: number,
 ): Promise<Array<{ rule: string; message: string }>> => {
   const aggregated: Array<{ rule: string; message: string }> = [];
   for (const ruleId of PORTED_RULE_IDS) {
-    const hits = await collectRuleHits(projectDir, ruleId);
+    const hits = await collectRuleHits(
+      projectDir,
+      ruleId,
+      reactMajorVersion === undefined ? {} : { reactMajorVersion },
+    );
     for (const hit of hits) {
       aggregated.push({ rule: ruleId, message: hit.message });
     }
@@ -95,17 +107,20 @@ export const runUpstreamParity = (
 
   describe(`${fixtureName} parity (port of eslint-plugin-react-you-might-not-need-an-effect)`, () => {
     for (const validCase of fixture.valid) {
-      const itFn = validCase.todo ? it.skip : it;
+      const itFn = validCase.todo || validCase.divergence ? it.skip : it;
       itFn(`valid #${validCase.idx} "${validCase.name}"`, async () => {
         const projectDir = setupReactProject(
           tempRoot,
           `v-${validCase.idx}-${slugify(validCase.name)}`,
           {
             files: { "src/Component.tsx": wrapAsTsx(validCase.code) },
+            ...(options.reactMajorVersion === undefined
+              ? {}
+              : { reactVersion: `^${options.reactMajorVersion}.0.0` }),
           },
         );
         if (options.assertNoneOfPortedRules) {
-          const hits = await collectAnyPortedRuleHits(projectDir);
+          const hits = await collectAnyPortedRuleHits(projectDir, options.reactMajorVersion);
           if (hits.length !== 0) {
             fs.appendFileSync(
               failureLogPath,
@@ -118,7 +133,13 @@ export const runUpstreamParity = (
           expect(hits).toHaveLength(0);
           return;
         }
-        const hits = await collectRuleHits(projectDir, ruleIdToFilter);
+        const hits = await collectRuleHits(
+          projectDir,
+          ruleIdToFilter,
+          options.reactMajorVersion === undefined
+            ? {}
+            : { reactMajorVersion: options.reactMajorVersion },
+        );
         if (hits.length !== 0) {
           fs.appendFileSync(
             failureLogPath,
@@ -133,16 +154,25 @@ export const runUpstreamParity = (
     }
 
     for (const invalidCase of fixture.invalid) {
-      const itFn = invalidCase.todo ? it.skip : it;
+      const itFn = invalidCase.todo || invalidCase.divergence ? it.skip : it;
       itFn(`invalid #${invalidCase.idx} "${invalidCase.name}"`, async () => {
         const projectDir = setupReactProject(
           tempRoot,
           `i-${invalidCase.idx}-${slugify(invalidCase.name)}`,
           {
             files: { "src/Component.tsx": wrapAsTsx(invalidCase.code) },
+            ...(options.reactMajorVersion === undefined
+              ? {}
+              : { reactVersion: `^${options.reactMajorVersion}.0.0` }),
           },
         );
-        const hits = await collectRuleHits(projectDir, ruleIdToFilter);
+        const hits = await collectRuleHits(
+          projectDir,
+          ruleIdToFilter,
+          options.reactMajorVersion === undefined
+            ? {}
+            : { reactMajorVersion: options.reactMajorVersion },
+        );
         if (hits.length !== (invalidCase.errors ?? 1)) {
           fs.appendFileSync(
             failureLogPath,

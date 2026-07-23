@@ -6,6 +6,184 @@ const run = (code: string) =>
   runRule(noUnstableNestedComponents, code, { filename: "fixture.tsx" });
 
 describe("react-builtins/no-unstable-nested-components — regressions", () => {
+  it("stays silent on an authentic Solid nested component with local signal state", () => {
+    const result = run(`
+      import { createSignal, Show } from "solid-js";
+      const DialogConnectProvider = () => {
+        const ProviderOption = (props) => {
+          const [attempts, setAttempts] = createSignal(0);
+          return <button onClick={() => setAttempts(attempts() + 1)}>{props.name}: {attempts()}</button>;
+        };
+        return <Show when={true}><ProviderOption name="OpenCode" /></Show>;
+      };
+    `);
+    expect(result.parseErrors).toEqual([]);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("stays silent when solid-js/web establishes renderer ownership", () => {
+    const result = run(`
+      import { render } from "solid-js/web";
+      const App = () => {
+        const Child = () => <div>Solid</div>;
+        return <Child />;
+      };
+      render(() => <App />, document.body);
+    `);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("stays silent for a Solid runtime subpath import", () => {
+    const result = run(`
+      import { createStore } from "solid-js/store";
+      const App = () => {
+        const Child = () => <div>Solid</div>;
+        return <Child />;
+      };
+    `);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("stays silent when a later classList attribute proves Solid JSX ownership", () => {
+    const result = run(`
+      const App = () => {
+        const Child = () => <div>Solid</div>;
+        return <main><Child /><div classList={{ active: true }} /></main>;
+      };
+    `);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("still reports the same nested component in an explicitly React-owned file", () => {
+    const result = run(`
+      import { useState } from "react";
+      const App = () => {
+        const Child = () => {
+          const [count] = useState(0);
+          return <div>{count}</div>;
+        };
+        return <Child />;
+      };
+    `);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still reports a nested component when JSX ownership is ambiguous", () => {
+    const result = run(`
+      const App = () => {
+        const Child = () => <div>Ambiguous</div>;
+        return <Child />;
+      };
+    `);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still reports when React and Solid runtime imports make ownership mixed", () => {
+    const result = run(`
+      import { useState } from "react";
+      import { createSignal } from "solid-js";
+      const App = () => {
+        const Child = () => {
+          const [count] = useState(0);
+          return <div>{count}</div>;
+        };
+        return <Child />;
+      };
+    `);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still reports when a React file has a late Solid JSX marker", () => {
+    const result = run(`
+      import { useState } from "react";
+      const App = () => {
+        const Child = () => {
+          const [count] = useState(0);
+          return <div>{count}</div>;
+        };
+        return <main><Child /><Widget classList={{ active: true }} /></main>;
+      };
+    `);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("still reports when Solid is imported only for types", () => {
+    const result = run(`
+      import type { JSX } from "solid-js";
+      const App = () => {
+        const Child = (): JSX.Element => <div>Ambiguous</div>;
+        return <Child />;
+      };
+    `);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("ignores a React type-only import in a Solid-owned file", () => {
+    const result = run(`
+      import type { ReactNode } from "react";
+      import { createSignal } from "solid-js";
+      const App = () => {
+        const Child = () => {
+          const [count] = createSignal(0);
+          return <div>{count()}</div>;
+        };
+        return <Child />;
+      };
+    `);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("stays silent for an aliased Solid runtime import", () => {
+    const result = run(`
+      import { createSignal as makeSignal } from "solid-js";
+      const App = () => {
+        const Child = () => {
+          const [count] = makeSignal(0);
+          return <div>{count()}</div>;
+        };
+        return <Child />;
+      };
+    `);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("stays silent for the explicit Solid JSX runtime", () => {
+    const result = run(`
+      import { jsx } from "solid-js/jsx-runtime";
+      const App = () => {
+        const Child = () => <div>Solid</div>;
+        return <Child />;
+      };
+    `);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("does not treat a similarly named userland package as Solid ownership", () => {
+    const result = run(`
+      import { createSignal } from "solid-js-userland";
+      const App = () => {
+        const Child = () => <div>Ambiguous</div>;
+        return <Child />;
+      };
+    `);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("keeps module-scope Solid and React components quiet", () => {
+    const solidResult = run(`
+      import { createSignal } from "solid-js";
+      const Child = () => <div>Solid</div>;
+      const App = () => <Child />;
+    `);
+    const reactResult = run(`
+      import { useState } from "react";
+      const Child = () => <div>React</div>;
+      const App = () => <Child />;
+    `);
+    expect(solidResult.diagnostics).toEqual([]);
+    expect(reactResult.diagnostics).toEqual([]);
+  });
+
   it("flags a nested PascalCase component rendered as JSX", () => {
     const result = run(`
       const Parent = () => {
@@ -34,6 +212,234 @@ describe("react-builtins/no-unstable-nested-components — regressions", () => {
       };
     `);
     expect(result.diagnostics).toEqual([]);
+  });
+
+  it("does not flag a render callback passed to useMemo or called inline", () => {
+    const result = run(`
+      import { useMemo } from "react";
+      export const Parent = ({ memoize }: { memoize: boolean }) => {
+        const RenderContent = () => <div>Hello</div>;
+        return memoize ? useMemo(RenderContent, []) : RenderContent();
+      };
+    `);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("does not flag multi-hop aliases used only as a useMemo callback", () => {
+    const result = run(`
+      import * as ReactClient from "react";
+      const Parent = () => {
+        const RenderContent = () => <div>Hello</div>;
+        const firstRenderAlias = RenderContent;
+        const SecondRenderAlias = firstRenderAlias;
+        return ReactClient.useMemo(SecondRenderAlias, []);
+      };
+    `);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("does not flag wrapped callbacks passed through a renamed useMemo import", () => {
+    const result = run(`
+      import { useMemo as calculateMemo } from "react";
+      const Parent = () => {
+        const RenderContent = () => <div>Hello</div>;
+        return calculateMemo(RenderContent as () => React.ReactNode, []);
+      };
+    `);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("flags a nested component that is rendered as JSX on another branch", () => {
+    const result = run(`
+      import { useMemo } from "react";
+      const Parent = ({ renderAsComponent }) => {
+        const RenderContent = () => <div>Hello</div>;
+        if (renderAsComponent) return <RenderContent />;
+        return useMemo(RenderContent, []);
+      };
+    `);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("flags a multi-hop immutable alias rendered as JSX", () => {
+    const result = run(`
+      const Parent = () => {
+        const Nested = () => <div>Hello</div>;
+        const firstNestedAlias = Nested;
+        const SecondNestedAlias = firstNestedAlias;
+        return <SecondNestedAlias />;
+      };
+    `);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag a reassigned nested binding whose replacement is rendered", () => {
+    const result = run(`
+      import { External } from "./external";
+      const Parent = () => {
+        let Nested = () => <div>Hello</div>;
+        Nested = External;
+        return <Nested />;
+      };
+    `);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("does not treat a shadowed createElement call as React instantiation", () => {
+    const result = run(`
+      const Parent = () => {
+        const Nested = () => <div>Hello</div>;
+        const createElement = (callback) => callback();
+        return createElement(Nested);
+      };
+    `);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("does not treat another library namespace as React instantiation", () => {
+    const result = run(`
+      import * as Template from "template-runtime";
+      const Parent = () => {
+        const Nested = () => <div>Hello</div>;
+        return Template.createElement(Nested);
+      };
+    `);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("does not treat cloneElement input as a component type", () => {
+    const result = run(`
+      import { cloneElement } from "react";
+      const Parent = () => {
+        const Nested = () => <div>Hello</div>;
+        return cloneElement(Nested as unknown as React.ReactElement);
+      };
+    `);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("flags createElement calls proven to come from React", () => {
+    const namedImportResult = run(`
+      import { createElement as makeReactElement } from "react";
+      const Parent = () => {
+        const Nested = () => <div>Hello</div>;
+        return makeReactElement(Nested);
+      };
+    `);
+    const namespaceImportResult = run(`
+      import * as ReactClient from "react";
+      const Parent = () => {
+        const Nested = () => <div>Hello</div>;
+        return ReactClient.createElement(Nested);
+      };
+    `);
+    expect(namedImportResult.diagnostics).toHaveLength(1);
+    expect(namespaceImportResult.diagnostics).toHaveLength(1);
+  });
+
+  it("does not treat arbitrary JSX props or children as element-type sinks", () => {
+    const result = run(`
+      const Parent = () => {
+        const RenderContent = () => <div>Hello</div>;
+        return <Widget callback={RenderContent}>{RenderContent}</Widget>;
+      };
+    `);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("flags recognized element-type props", () => {
+    const result = run(`
+      const Parent = () => {
+        const Nested = () => <div>Hello</div>;
+        return <Widget ItemComponent={Nested} />;
+      };
+    `);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("preserves common library component-slot props", () => {
+    for (const attributeName of ["body", "calendarContainer", "fallback", "tooltip"]) {
+      const result = run(`
+        const Parent = () => {
+          const Nested = () => <div>Hello</div>;
+          return <Widget ${attributeName}={Nested} />;
+        };
+      `);
+      expect(result.diagnostics).toHaveLength(1);
+    }
+  });
+
+  it("flags nested functions flowing through memo wrappers into JSX", () => {
+    const result = run(`
+      import { memo } from "react";
+      const Parent = () => {
+        const Nested = () => <div>Hello</div>;
+        const MemoizedNested = memo(Nested);
+        return <MemoizedNested />;
+      };
+    `);
+    expect(result.diagnostics).toHaveLength(1);
+  });
+
+  it("does not flag an unused inline memo wrapper", () => {
+    const result = run(`
+      import { memo } from "react";
+      const Parent = () => {
+        memo(() => <div>Hello</div>);
+        return <main />;
+      };
+    `);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("flags rendered React lazy wrappers but not unused ones", () => {
+    const renderedResult = run(`
+      import { lazy as loadLazy } from "react";
+      const Parent = () => {
+        const LazyNested = loadLazy(() => import("./nested"));
+        return <LazyNested />;
+      };
+    `);
+    const unusedResult = run(`
+      import * as ReactClient from "react";
+      const Parent = () => {
+        ReactClient.lazy(() => import("./nested"));
+        return <main />;
+      };
+    `);
+    expect(renderedResult.diagnostics).toHaveLength(1);
+    expect(unusedResult.diagnostics).toEqual([]);
+  });
+
+  it("does not flag nested functions returned as values", () => {
+    const result = run(`
+      const Parent = ({ returnFactory }) => {
+        const Nested = () => <div>Hello</div>;
+        if (returnFactory) return Nested;
+        return <main />;
+      };
+    `);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("does not attribute JSX across a nested function boundary", () => {
+    const result = run(`
+      function Parent() {
+        const Child = () => <div>child</div>;
+        return Child;
+      }
+    `);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("detects JSX behind a TypeScript value wrapper", () => {
+    const result = run(`
+      const Parent = () => {
+        const Child = () => (<div>child</div> as React.ReactElement);
+        return <Child />;
+      };
+    `);
+    expect(result.diagnostics).toHaveLength(1);
   });
 
   // The instantiation gate is keyed by SYMBOL: a same-named JSX usage of

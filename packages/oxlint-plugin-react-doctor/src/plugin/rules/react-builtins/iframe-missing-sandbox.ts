@@ -9,6 +9,7 @@ import { isNodeOfType } from "../../utils/is-node-of-type.js";
 import { isNullishExpression } from "../../utils/is-nullish-expression.js";
 import type { Rule } from "../../utils/rule.js";
 import { skipNonProductionFiles } from "../../utils/skip-non-production-files.js";
+import { resolveJsxElementType } from "../../utils/resolve-jsx-element-type.js";
 
 const ALLOWED_SANDBOX_VALUES = new Set([
   "downloads-without-user-activation",
@@ -33,6 +34,13 @@ const INVALID_VALUE_MESSAGE = (value: string): string =>
   `\`${value}\` isn't a valid \`sandbox\` token, so the browser ignores it & leaves your iframe exposed.`;
 const INVALID_COMBINATION_MESSAGE =
   "Combining `allow-scripts` & `allow-same-origin` lets the iframe remove its own sandbox, defeating the protection.";
+
+// The permissions-policy boilerplate vendors ship with third-party video
+// embeds (YouTube/Vimeo: `allow="… encrypted-media; picture-in-picture …"`).
+// Such players need `allow-scripts` + `allow-same-origin` to function — the
+// exact pair this rule bans — so no compliant sandbox exists, and the
+// cross-origin frame never had "full access to your site" to begin with.
+const MEDIA_EMBED_ALLOW_PATTERN = /encrypted-media|picture-in-picture/i;
 
 const isAllowedSandboxToken = (token: string): boolean => {
   if (token === "") return true;
@@ -77,9 +85,10 @@ export const iframeMissingSandbox = defineRule({
   recommendation:
     'Add `sandbox=""` or a curated value so embedded pages cannot get full access to your site by default.',
   category: "Security",
+  matchByOccurrence: true,
   create: skipNonProductionFiles((context) => ({
     JSXOpeningElement(node: EsTreeNodeOfType<"JSXOpeningElement">) {
-      if (!isNodeOfType(node.name, "JSXIdentifier") || node.name.name !== "iframe") return;
+      if (resolveJsxElementType(node) !== "iframe") return;
       const sandboxAttr = hasJsxPropIgnoreCase(node.attributes, "sandbox");
       if (!sandboxAttr) {
         // A fully-opaque spread (`<iframe {...props} />`) can forward
@@ -88,6 +97,23 @@ export const iframeMissingSandbox = defineRule({
         // embed site, where a missing `sandbox` is the author's omission.
         const hasExplicitSrc = Boolean(hasJsxPropIgnoreCase(node.attributes, "src"));
         if (!hasExplicitSrc && hasJsxSpreadAttribute(node.attributes)) return;
+        // A `ref`-driven frame with no `src`/`srcDoc` starts as `about:blank`
+        // and is scripted by the parent itself — there is no embedded page to
+        // sandbox, and any effective sandbox would break the parent's
+        // `contentWindow` access.
+        const hasSrcDoc = Boolean(hasJsxPropIgnoreCase(node.attributes, "srcDoc"));
+        if (
+          !hasExplicitSrc &&
+          !hasSrcDoc &&
+          Boolean(hasJsxPropIgnoreCase(node.attributes, "ref"))
+        ) {
+          return;
+        }
+        const allowAttr = hasJsxPropIgnoreCase(node.attributes, "allow");
+        if (allowAttr) {
+          const allowValue = getJsxPropStringValue(allowAttr);
+          if (allowValue !== null && MEDIA_EMBED_ALLOW_PATTERN.test(allowValue)) return;
+        }
         context.report({ node: node.name, message: MISSING_MESSAGE });
         return;
       }

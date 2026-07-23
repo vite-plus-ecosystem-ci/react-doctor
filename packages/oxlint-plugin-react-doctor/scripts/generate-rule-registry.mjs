@@ -48,9 +48,39 @@ const BUCKETS_REQUIRING_REACT = new Set([
   "performance",
   "react-builtins",
   "react-ui",
+  "r3f",
   "state-and-effects",
+  "valtio",
   "view-transitions",
 ]);
+
+const BUCKET_TO_REQUIRED_CAPABILITIES = {
+  r3f: ["react", "r3f"],
+};
+
+const THREE_RULE_IDS_REQUIRING_REACT = new Set([
+  "three-no-object-construction-in-render",
+  "three-no-state-in-animation-loop",
+  "three-no-state-in-pointer-move",
+  "three-require-animation-mixer-cleanup",
+  "three-require-controls-cleanup",
+  "three-require-owned-geometry-cleanup",
+  "three-require-owned-material-cleanup",
+  "three-require-owned-texture-cleanup",
+  "three-require-postprocessing-cleanup",
+  "three-require-render-target-cleanup",
+  "three-require-renderer-cleanup",
+]);
+
+const getRequiredCapabilities = (bucketName, ruleId) => {
+  if (bucketName === "r3f" && ruleId.startsWith("three-")) {
+    return THREE_RULE_IDS_REQUIRING_REACT.has(ruleId) ? ["react", "three"] : ["three"];
+  }
+  return (
+    BUCKET_TO_REQUIRED_CAPABILITIES[bucketName] ??
+    (BUCKETS_REQUIRING_REACT.has(bucketName) ? ["react"] : [])
+  );
+};
 
 // Bucket directory → behavioral tags merged onto every rule in that
 // bucket at registry-build time. Lets cross-cutting controls
@@ -60,9 +90,18 @@ const BUCKETS_REQUIRING_REACT = new Set([
 // authored tags layer on top (deduped at runtime), so a rule can both
 // inherit a bucket tag and carry its own.
 const BUCKET_TO_AUTO_TAGS = {
+  design: ["design"],
+  ink: ["ink"],
   "react-native": ["react-native"],
+  r3f: ["r3f", "webgl"],
+  webgl: ["webgl"],
   "security-scan": ["security-scan"],
   server: ["server-action"],
+};
+
+const getAutoTags = (bucketName, ruleId) => {
+  if (bucketName === "r3f" && ruleId.startsWith("three-")) return ["three", "webgl"];
+  return BUCKET_TO_AUTO_TAGS[bucketName] ?? [];
 };
 
 // Buckets containing rules ported from external upstream linters
@@ -90,11 +129,32 @@ const EFFECT_RULES_PORTED_FROM_EXTERNAL = new Set([
 // `customRulesOnly`. Without this list every new in-house rule we drop
 // into `a11y/` would silently disappear for users who narrow scope.
 const RULES_NOT_PORTED_FROM_EXTERNAL = new Set([
+  "data-table-requires-accessible-name",
+  "details-requires-summary",
+  "fieldset-requires-legend",
+  "form-control-requires-name",
   "prefer-html-dialog",
+  "no-autoplay-without-muted",
+  "no-assertive-status",
+  "no-aria-invalid-without-description",
+  "no-blocked-paste",
+  "no-broken-image-source",
+  "no-focusable-content-in-aria-hidden",
+  "no-multiple-unlabeled-navigation-landmarks",
+  "no-multiple-main-landmarks",
+  "no-nonresizable-textarea",
+  "no-placeholder-only-field",
+  "no-skipped-heading-level",
+  "no-static-motion-config-never",
+  "no-ungated-tailwind-animation",
+  "no-uninformative-aria-label",
   "dialog-has-accessible-name",
   "no-create-ref-in-function-component",
   "no-call-component-as-function",
   "no-string-false-on-boolean-attribute",
+  "hook-import-rename-loses-use-prefix",
+  "no-invalid-progress-range",
+  "role-button-requires-complete-keyboard-activation",
 ]);
 
 // Rule ids whose source files are kept on disk but intentionally NOT
@@ -152,13 +212,16 @@ const BUCKET_TO_DEFAULT_CATEGORY = {
   client: "Performance",
   correctness: "Correctness",
   design: "Architecture",
+  ink: "Correctness",
   "js-performance": "Performance",
   jotai: "State & Effects",
+  mobx: "State & Effects",
   nextjs: "Next.js",
   performance: "Performance",
   preact: "Preact",
   "react-builtins": "Correctness",
   "react-native": "React Native",
+  r3f: "Performance",
   "react-ui": "Accessibility",
   security: "Security",
   "security-scan": "Security",
@@ -166,7 +229,9 @@ const BUCKET_TO_DEFAULT_CATEGORY = {
   "state-and-effects": "State & Effects",
   "tanstack-query": "TanStack Query",
   "tanstack-start": "TanStack Start",
+  valtio: "State & Effects",
   "view-transitions": "Correctness",
+  webgl: "Performance",
   zod: "Architecture",
 };
 
@@ -194,14 +259,16 @@ for (const bucket of fs.readdirSync(PLUGIN_RULES_ROOT, { withFileTypes: true }))
     // (a `scan` field instead of `create`) also register through plain
     // `defineRule`.
     const exportMatch = source.match(
-      /export\s+const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:defineRule|defineRetiredRule)\b[^(]*\(\s*\{/,
+      /export\s+const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:wrapReactRouterRule\s*\(\s*)?(?:defineRule|defineRetiredRule)\b[^(]*\(\s*\{/,
     );
     if (!exportMatch) {
       // Fail loudly if a file clearly declares a rule export but the scanner
       // can't parse it — a silent `continue` would ship a registry missing
       // the rule with no error.
       if (
-        /export\s+const\s+[A-Za-z_$][\w$]*\s*=\s*(?:defineRule|defineRetiredRule)\b/.test(source)
+        /export\s+const\s+[A-Za-z_$][\w$]*\s*=\s*(?:wrapReactRouterRule\s*\(\s*)?(?:defineRule|defineRetiredRule)\b/.test(
+          source,
+        )
       ) {
         console.error(
           `Rule export present but unparseable by the registry scanner: ${path.relative(PACKAGE_ROOT, filePath)}`,
@@ -238,8 +305,8 @@ for (const bucket of fs.readdirSync(PLUGIN_RULES_ROOT, { withFileTypes: true }))
         .relative(path.dirname(REGISTRY_OUTPUT), filePath)
         .replaceAll(path.sep, "/")
         .replace(/\.ts$/, ".js");
-    const autoTags = BUCKET_TO_AUTO_TAGS[bucket.name] ?? [];
-    const requiresReact = BUCKETS_REQUIRING_REACT.has(bucket.name);
+    const autoTags = getAutoTags(bucket.name, ruleId);
+    const requiredCapabilities = getRequiredCapabilities(bucket.name, ruleId);
     const originallyExternal =
       !RULES_NOT_PORTED_FROM_EXTERNAL.has(ruleId) &&
       (BUCKETS_PORTED_FROM_EXTERNAL.has(bucket.name) ||
@@ -252,7 +319,7 @@ for (const bucket of fs.readdirSync(PLUGIN_RULES_ROOT, { withFileTypes: true }))
       category,
       severity,
       autoTags,
-      requiresReact,
+      requiredCapabilities,
       originallyExternal,
     });
   }
@@ -289,23 +356,33 @@ const formatAutoTagsLine = (entry) => {
   return `      tags: [...new Set([${autoTagLiteral}, ...(${entry.identifier}.tags ?? [])])],\n`;
 };
 
-// Merge the bucket-synthesized `"react"` capability with any
-// rule-authored `requires` (deduped), mirroring the auto-tag merge. A
+// Merge bucket-synthesized capabilities with any rule-authored `requires`
+// (deduped), mirroring the auto-tag merge. A
 // rule that already pins a React version (e.g. `requires: ["react:19"]`)
 // keeps that; the redundant `"react"` is harmless since the version gate
 // already implies React is present.
 const formatRequiresLine = (entry) => {
-  if (!entry.requiresReact) return "";
+  if (entry.requiredCapabilities.length === 0) return "";
+  const requiredCapabilities = entry.requiredCapabilities
+    .map((capability) => `"${capability}"`)
+    .join(", ");
   // Match prettier's 100-char print width so `gen:check` and `format:check`
   // agree: emit the single-line form when it fits, else the wrapped form
   // prettier would otherwise rewrite it into (a few rules have long enough
   // identifiers — e.g. `noNoninteractiveElementToInteractiveRole` — to spill
   // past the limit).
-  const singleLine = `      requires: [...new Set(["react", ...(${entry.identifier}.requires ?? [])])],`;
+  const singleLine = `      requires: [...new Set<Capability>([${requiredCapabilities}, ...(${entry.identifier}.requires ?? [])])],`;
   if (singleLine.length <= 100) return `${singleLine}\n`;
+  const wrappedSetLine = `        ...new Set<Capability>([${requiredCapabilities}, ...(${entry.identifier}.requires ?? [])]),`;
+  if (wrappedSetLine.length <= 100) {
+    return `      requires: [\n${wrappedSetLine}\n      ],\n`;
+  }
   return (
     `      requires: [\n` +
-    `        ...new Set(["react", ...(${entry.identifier}.requires ?? [])]),\n` +
+    `        ...new Set<Capability>([\n` +
+    entry.requiredCapabilities.map((capability) => `          "${capability}",\n`).join("") +
+    `          ...(${entry.identifier}.requires ?? []),\n` +
+    `        ]),\n` +
     `      ],\n`
   );
 };
@@ -345,6 +422,7 @@ const generatedSource = `// GENERATED FILE — do not edit by hand. Run \`pnpm g
 // \`category\` when needed. Adding a rule is a single-file operation:
 // create the rule file, set its \`id\`, re-run codegen.
 
+import type { Capability } from "./utils/capability.js";
 import type { Rule } from "./utils/rule.js";
 
 ${importLines}
