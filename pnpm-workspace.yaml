@@ -11,6 +11,13 @@ minimumReleaseAgeExclude:
   - "oxc-*"
   - "oxlint"
   - "oxlint-*"
+  - vite-plus
+  - "@voidzero-dev/*"
+  - oxlint-tsgolint
+  - oxfmt
+  - "@oxfmt/*"
+  - vitest
+  - "@vitest/*"
 trustPolicy: no-downgrade
 # Ecosystem-ci smoke test only: preview builds are published by the registry
 # bridge without provenance attestation, which trips the no-downgrade check.
@@ -24,5 +31,21 @@ trustPolicyExclude:
 blockExoticSubdeps: true
 
 overrides:
-  vite: npm:@voidzero-dev/vite-plus-core@^0.1.15
-  vitest: npm:@voidzero-dev/vite-plus-test@^0.1.15
+  vite@*: "catalog:"
+  vitest@*: "catalog:"
+onlyBuiltDependencies:
+  - "@parcel/watcher"
+  - "@sentry/cli"
+  - esbuild
+  - unrs-resolver
+catalog:
+  vite: npm:@voidzero-dev/vite-plus-core@0.0.0-commit.7ebf81e43af581194844e8fe18f65ed2eb544642
+  vitest: 4.1.11
+  vite-plus: 0.0.0-commit.7ebf81e43af581194844e8fe18f65ed2eb544642
+peerDependencyRules:
+  allowAny:
+    - vite
+    - vitest
+  allowedVersions:
+    vite: "*"
+    vitest: "*"
