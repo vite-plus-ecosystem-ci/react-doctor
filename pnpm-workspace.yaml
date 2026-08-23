@@ -12,6 +12,15 @@ minimumReleaseAgeExclude:
   - "oxlint"
   - "oxlint-*"
 trustPolicy: no-downgrade
+# Ecosystem-ci smoke test only: preview builds are published by the registry
+# bridge without provenance attestation, which trips the no-downgrade check.
+# Real vite-plus npm releases are published with provenance.
+trustPolicyExclude:
+  - vite-plus
+  - "@voidzero-dev/*"
+  # pnpm cross-major false positive (pnpm/pnpm#10202): an earlier-published
+  # version on another major carries provenance this one lacks.
+  - semver
 blockExoticSubdeps: true
 
 overrides:
