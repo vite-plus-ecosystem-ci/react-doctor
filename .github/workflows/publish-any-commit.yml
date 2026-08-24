@@ -35,7 +35,10 @@ jobs:
 
       - run: pnpm build
 
+      # Ecosystem-ci smoke test: publishing a preview package needs a GitHub App or
+      # token the fork does not have, and it does not exercise the pinned Vite+.
       - name: Publish packages (retry on transient failures)
+        if: ${{ github.repository_owner != 'vite-plus-ecosystem-ci' }}
         run: |
           max_attempts=4
           attempt=1
