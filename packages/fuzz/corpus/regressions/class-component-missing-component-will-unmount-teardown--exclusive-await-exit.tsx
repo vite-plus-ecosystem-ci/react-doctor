@@ -24,7 +24,7 @@ export class Listener extends React.Component {
 
 export class DeadLoopListener extends React.Component {
   componentDidMount(): void {
-    for (; false; ) {
+    for (; false;) {
       emitter.on("change", this.handleChange);
     }
   }

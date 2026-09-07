@@ -22,13 +22,11 @@ interface SpawnMockState {
   autoClose: boolean;
 }
 
-const spawnState = vi.hoisted(
-  (): SpawnMockState => ({
-    callCount: 0,
-    killCount: 0,
-    autoClose: true,
-  }),
-);
+const spawnState = vi.hoisted((): SpawnMockState => ({
+  callCount: 0,
+  killCount: 0,
+  autoClose: true,
+}));
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();

@@ -57,17 +57,15 @@ export const buildMatrixEvaluationPlan = ({
 }): MatrixEvaluationPlan => {
   const firstTreatment = treatments[0];
   if (!firstTreatment) throw new Error("Matrix evaluation requires at least one treatment");
-  const treatmentLanes = treatments.map(
-    (treatment): MatrixEvaluationLane => ({
-      id: treatment.descriptor.id,
-      kind: "treatment",
-      reactDoctorRepository: treatment.descriptor.reactDoctorRepository,
-      reactDoctorRef: treatment.descriptor.reactDoctorCommit,
-      ruleKeys: treatment.ruleKeys,
-      ...buildLanePaths(treatment.descriptor.id),
-      treatment,
-    }),
-  );
+  const treatmentLanes = treatments.map((treatment): MatrixEvaluationLane => ({
+    id: treatment.descriptor.id,
+    kind: "treatment",
+    reactDoctorRepository: treatment.descriptor.reactDoctorRepository,
+    reactDoctorRef: treatment.descriptor.reactDoctorCommit,
+    ruleKeys: treatment.ruleKeys,
+    ...buildLanePaths(treatment.descriptor.id),
+    treatment,
+  }));
   const hasFullTreatment = treatments.some((treatment) => treatment.impactManifest.mode === "full");
   const baseRuleKeys = hasFullTreatment
     ? []

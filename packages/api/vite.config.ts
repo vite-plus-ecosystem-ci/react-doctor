@@ -8,6 +8,7 @@ export default defineConfig({
         "project-analysis-worker": "./src/project-analysis-worker.ts",
       },
       deps: {
+        resolveDepSubpath: true,
         neverBundle: [
           "effect",
           "oxc-parser",

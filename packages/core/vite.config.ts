@@ -18,6 +18,7 @@ export default defineConfig({
         schemas: "./src/schemas.ts",
       },
       deps: {
+        resolveDepSubpath: true,
         neverBundle: [
           "@astrojs/compiler",
           "@effect/platform-node-shared",

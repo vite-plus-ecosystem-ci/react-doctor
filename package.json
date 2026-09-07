@@ -47,30 +47,19 @@
     "@react-doctor/core": "workspace:*",
     "@sentry/cli": "^3.4.3",
     "@types/node": "^25.6.0",
-    "@voidzero-dev/vite-plus-core": "^0.1.15",
+    "@voidzero-dev/vite-plus-core": "0.0.0-commit.6d65e1780791e2b24b27cf7deb63f57a420e78de",
     "commander": "^14.0.3",
     "cross-env": "^10.1.0",
     "simple-statistics": "^7.9.3",
     "tsx": "^4.22.4",
     "turbo": "^2.9.7",
     "typescript": "^6.0.3",
-    "vite-plus": "^0.1.15"
+    "vite": "catalog:",
+    "vite-plus": "catalog:"
   },
   "engines": {
     "node": "^20.19.0 || >=22.13.0",
     "pnpm": ">=8"
   },
-  "packageManager": "pnpm@10.29.1",
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "@parcel/watcher",
-      "@sentry/cli",
-      "esbuild",
-      "unrs-resolver"
-    ],
-    "overrides": {
-      "oxlint": ">=1.79.0 <1.80.0",
-      "oxlint-tsgolint": "^7.0.2001"
-    }
-  }
+  "packageManager": "pnpm@10.29.1"
 }

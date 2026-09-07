@@ -66,6 +66,7 @@ export default defineConfig({
         "project-analysis-worker": "./src/project-analysis-worker.ts",
       },
       deps: {
+        resolveDepSubpath: true,
         // Inline pure-JS CLI deps and the Ink/React renderer so the inspected
         // project cannot supply a missing or incompatible React peer. Native
         // dependencies, Yoga's WASM module, prompts (we monkey-patch it via
@@ -148,6 +149,7 @@ export default defineConfig({
     {
       entry: { index: "./src/index.ts" },
       deps: {
+        resolveDepSubpath: true,
         alwaysBundle: ["commander", "ora", "yaml"],
         neverBundle: [
           "@astrojs/compiler",
@@ -171,9 +173,7 @@ export default defineConfig({
     },
     {
       entry: { "runtime-scan/browser-probe": "./src/cli/runtime-scan/browser-probe.ts" },
-      deps: {
-        alwaysBundle: ["bippy", "react"],
-      },
+      deps: { resolveDepSubpath: true, alwaysBundle: ["bippy", "react"] },
       clean: false,
       dts: false,
       format: ["iife"],
