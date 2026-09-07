@@ -47,7 +47,7 @@ jobs:
         include:
           - os: windows-latest
             node-version: "22.18.0"
-          - os: blacksmith-6vcpu-macos-latest
+          - os: macos-15
             node-version: "22.18.0"
     steps:
       - uses: actions/checkout@v5

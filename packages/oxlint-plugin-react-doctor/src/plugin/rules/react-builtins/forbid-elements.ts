@@ -83,7 +83,7 @@ export const forbidElements = defineRule({
         } else if (isNodeOfType(firstArgument, "Identifier")) {
           const firstChar = firstArgument.name.charCodeAt(0);
           const isPascalCase = firstChar >= 65 && firstChar <= 90;
-          const isLeadingUnderscore = firstChar === 95 /* _ */;
+          const isLeadingUnderscore = firstChar === 95; /* _ */
           if (isPascalCase || isLeadingUnderscore) elementName = firstArgument.name;
         } else if (isNodeOfType(firstArgument, "MemberExpression")) {
           elementName = flattenCalleeName(firstArgument);

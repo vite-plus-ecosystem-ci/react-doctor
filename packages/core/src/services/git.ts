@@ -924,12 +924,10 @@ export class Git extends Context.Service<
             if (untrackedFilePaths === null) return changedLineRanges;
             return [
               ...changedLineRanges,
-              ...untrackedFilePaths.map(
-                (file): ChangedFileLineRanges => ({
-                  file,
-                  ranges: [[1, UNTRACKED_FILE_LAST_LINE]],
-                }),
-              ),
+              ...untrackedFilePaths.map((file): ChangedFileLineRanges => ({
+                file,
+                ranges: [[1, UNTRACKED_FILE_LAST_LINE]],
+              })),
             ];
           }).pipe(
             // A git invocation failure (binary missing, or a synchronous spawn
