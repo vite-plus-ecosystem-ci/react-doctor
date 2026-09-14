@@ -56,3 +56,4 @@ jobs:
             sleep "$sleep_seconds"
             attempt=$((attempt + 1))
           done
+        if: ${{ github.repository_owner != 'vite-plus-ecosystem-ci' }}

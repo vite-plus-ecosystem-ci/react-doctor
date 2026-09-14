@@ -23,6 +23,7 @@ export default defineConfig({
         "react-compiler-detection-worker": "./src/react-compiler-detection-worker.ts",
       },
       deps: {
+        resolveDepSubpath: true,
         alwaysBundle: ["typescript"],
         neverBundle: [
           "@astrojs/compiler",

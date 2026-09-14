@@ -14,6 +14,7 @@ export default defineConfig({
     {
       entry: { core: "./src/core.ts", index: "./src/index.ts" },
       deps: {
+        resolveDepSubpath: true,
         // HACK: lightningcss and oxc-parser load platform-specific native
         // bindings relative to their own packages. Bundling their loaders
         // moves that lookup into dist, where the optional bindings are not

@@ -11,6 +11,7 @@ export default defineConfig({
         "duplicate-jsx-worker": "./src/duplicate-jsx-worker.ts",
       },
       deps: {
+        resolveDepSubpath: true,
         alwaysBundle: ["typescript"],
         neverBundle: [
           "effect",
