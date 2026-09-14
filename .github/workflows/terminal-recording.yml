@@ -44,7 +44,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes ffmpeg
-          ni --global @kitlangton/terminal-control-linux-x64-gnu@0.6.0
+          ni -g @kitlangton/terminal-control-linux-x64-gnu@0.6.0
           termctrl --version
 
       - name: Run interactive terminal E2E
@@ -63,6 +63,7 @@ jobs:
 
   comment:
     name: Post recording to PR
+    if: github.repository_owner != 'vite-plus-ecosystem-ci'
     needs: record
     runs-on: ubuntu-latest
     timeout-minutes: 5
