@@ -46,6 +46,7 @@
     "micromark-extension-mdxjs-esm": "^3.0.0",
     "oxc-parser": "^0.148.0",
     "oxc-resolver": "^11.24.2",
+    "oxlint": ">=1.81.0 <1.82.0",
     "oxlint-plugin-react-doctor": "workspace:*",
     "parse5": "^8.0.1",
     "picocolors": "^1.1.1",
