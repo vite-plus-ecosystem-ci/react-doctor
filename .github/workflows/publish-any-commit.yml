@@ -35,7 +35,8 @@ jobs:
 
       - run: pnpm build
 
-      - name: Publish packages (retry on transient failures)
+      - if: ${{ github.repository_owner != 'vite-plus-ecosystem-ci' }}
+        name: Publish packages (retry on transient failures)
         run: |
           max_attempts=4
           attempt=1
