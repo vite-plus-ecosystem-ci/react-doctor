@@ -2,6 +2,10 @@ import { defineConfig } from "vite-plus";
 
 export default defineConfig({
   test: {
+    // Vitest v4 compatibility: preserve mock call history.
+    // Remove after tests no longer rely on calls from setup or earlier tests.
+    // https://vitest.dev/guide/migration/#clearmocks-is-enabled-by-default
+    clearMocks: false,
     // Corpus checkouts under tmp/ carry their own *.spec.ts / *.test.ts
     // files; without this include they'd be globbed into our run.
     include: ["tests/**/*.test.ts"],
