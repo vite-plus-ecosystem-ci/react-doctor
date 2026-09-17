@@ -292,6 +292,9 @@ importers:
       oxc-resolver:
         specifier: ^11.24.2
         version: 11.24.2
+      oxlint:
+        specifier: 1.83.0
+        version: 1.83.0(oxlint-tsgolint@7.0.2001)(vite-plus@0.0.0-commit.fba044cf40fea5a7bf4a2ee97822f174eab33dfa(@opentelemetry/api@1.9.1)(@types/node@25.9.6)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.13)(typescript@6.0.3)(yaml@2.9.1))
       oxlint-plugin-react-doctor:
         specifier: workspace:*
         version: link:../oxlint-plugin-react-doctor
