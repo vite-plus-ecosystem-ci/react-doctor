@@ -64,12 +64,16 @@ jobs:
       - run: pnpm install --frozen-lockfile --prefer-offline
 
       - name: Run tests
-        if: ${{ matrix.os != 'windows-latest' && matrix.node-version != '20.19.0' }}
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.node-version != '20.19.0' }}
         run: pnpm test
 
       - name: Run Node 20 tests serially
         if: ${{ matrix.node-version == '20.19.0' }}
         run: pnpm test --concurrency=1
+
+      - name: Run macOS tests without competing workers
+        if: ${{ matrix.os == 'macos-latest' }}
+        run: pnpm test --concurrency=1 -- --maxWorkers=1
 
       - name: Run Windows tests serially
         if: ${{ matrix.os == 'windows-latest' }}
