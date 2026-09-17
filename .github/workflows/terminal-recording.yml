@@ -44,7 +44,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes ffmpeg
-          ni --global @kitlangton/terminal-control-linux-x64-gnu@0.6.0
+          npm install --global @kitlangton/terminal-control-linux-x64-gnu@0.6.0
           termctrl --version
 
       - name: Run interactive terminal E2E
