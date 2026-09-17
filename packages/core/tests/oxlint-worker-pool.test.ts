@@ -376,11 +376,11 @@ describe("createOxlintWorkerPool", () => {
   it("leaves a pre-spawned worker alone when the spawn parameters differ", async () => {
     const spec = buildOxlintWorkerSpawnSpec({
       nodeBinaryPath: process.execPath,
-      maxWorkers: 3,
+      maxWorkers: 2,
       workerScriptPath,
       oxlintPackageDirectory: temporaryDirectory,
       pluginPath: null,
-      environment: { ...process.env },
+      environment: { ...process.env, FAKE_WORKER_VARIANT: "prespawn" },
     });
     prespawnOxlintWorkers(spec, 1);
     const pool = createPool();
