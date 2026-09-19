@@ -43,11 +43,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        node-version: ["20.19.0", "22.18.0", "24", "25", "26"]
+        node-version: ["22.18.0", "24", "26"]
         include:
           - os: windows-latest
             node-version: "22.18.0"
-          - os: blacksmith-6vcpu-macos-latest
+          - os: macos-latest
             node-version: "22.18.0"
     steps:
       - uses: actions/checkout@v5

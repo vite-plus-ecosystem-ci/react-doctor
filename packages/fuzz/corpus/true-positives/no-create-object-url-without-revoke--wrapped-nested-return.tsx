@@ -5,5 +5,6 @@ export const makePreviewList = (blob: Blob, enabled: boolean) =>
   enabled && [URL.createObjectURL(blob)];
 
 export const makeLoggedPreview = (blob: Blob) => (
-  console.info(blob.type), { src: URL.createObjectURL(blob) }
+  console.info(blob.type),
+  { src: URL.createObjectURL(blob) }
 );

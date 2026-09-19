@@ -23,6 +23,7 @@ export default defineConfig({
         "react-compiler-detection-worker": "./src/react-compiler-detection-worker.ts",
       },
       deps: {
+        resolveDepSubpath: true,
         alwaysBundle: ["typescript"],
         neverBundle: [
           "@astrojs/compiler",
@@ -45,6 +46,10 @@ export default defineConfig({
     },
   ],
   test: {
+    // Vitest v4 compatibility: preserve mock call history.
+    // Remove after tests no longer rely on calls from setup or earlier tests.
+    // https://vitest.dev/guide/migration/#clearmocks-is-enabled-by-default
+    clearMocks: false,
     alias: [
       {
         find: /^@react-doctor\/core$/,
