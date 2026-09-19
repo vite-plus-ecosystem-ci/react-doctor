@@ -3,10 +3,42 @@ packages:
 
 minimumReleaseAge: 7200
 minimumReleaseAgeExclude:
+  - "@oxc-project/*"
   - agent-install
+  - "vite-plus"
+  - "@voidzero-dev/*"
+  - oxlint
+  - "@oxlint/*"
+  - oxlint-tsgolint
+  - "@oxlint-tsgolint/*"
+  - oxfmt
+  - "@oxfmt/*"
+  - vitest
+  - "@vitest/*"
 trustPolicy: no-downgrade
 blockExoticSubdeps: true
 
 overrides:
-  vite: npm:@voidzero-dev/vite-plus-core@^0.1.15
-  vitest: npm:@voidzero-dev/vite-plus-test@^0.1.15
+  vite@*: "catalog:"
+  vitest@*: "catalog:"
+
+trustPolicyExclude:
+  - "vite-plus"
+  - "@voidzero-dev/*"
+  - "semver"
+onlyBuiltDependencies:
+  - "@parcel/watcher"
+  - "@sentry/cli"
+  - esbuild
+  - unrs-resolver
+catalog:
+  vite: npm:@voidzero-dev/vite-plus-core@0.0.0-commit.40ce1b34104d16f3c3a2d9fe8eb1b016f5a06b67
+  vitest: 5.0.1
+  vite-plus: 0.0.0-commit.40ce1b34104d16f3c3a2d9fe8eb1b016f5a06b67
+peerDependencyRules:
+  allowAny:
+    - vite
+    - vitest
+  allowedVersions:
+    vite: "*"
+    vitest: "*"

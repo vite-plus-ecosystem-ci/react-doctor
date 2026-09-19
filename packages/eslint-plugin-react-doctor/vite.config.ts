@@ -10,10 +10,16 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.j
 };
 
 export default defineConfig({
+  test: {
+    // Vitest v4 compatibility: preserve mock call history.
+    // Remove after tests no longer rely on calls from setup or earlier tests.
+    // https://vitest.dev/guide/migration/#clearmocks-is-enabled-by-default
+    clearMocks: false,
+  },
   pack: [
     {
       entry: { index: "./src/index.ts" },
-      deps: { neverBundle: ["oxlint-plugin-react-doctor"] },
+      deps: { resolveDepSubpath: true, neverBundle: ["oxlint-plugin-react-doctor"] },
       dts: true,
       target: "node20",
       platform: "node",
