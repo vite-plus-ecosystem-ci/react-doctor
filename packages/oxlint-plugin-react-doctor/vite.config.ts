@@ -14,6 +14,7 @@ export default defineConfig({
     {
       entry: { core: "./src/core.ts", index: "./src/index.ts" },
       deps: {
+        resolveDepSubpath: true,
         // HACK: lightningcss and oxc-parser load platform-specific native
         // bindings relative to their own packages. Bundling their loaders
         // moves that lookup into dist, where the optional bindings are not
@@ -31,6 +32,11 @@ export default defineConfig({
     },
   ],
   test: {
+    // Vitest v4 compatibility: preserve mock call history.
+    // Remove after tests no longer rely on calls from setup or earlier tests.
+    // https://rfc-vitest-v5-upgrade-viteplus-dev.voidzero-docs.workers.dev/guide/vitest-v5#remove-unneeded-compatibility-settings
+    // https://vitest.dev/guide/migration/#clearmocks-is-enabled-by-default
+    clearMocks: false,
     testTimeout: 30_000,
   },
 });
