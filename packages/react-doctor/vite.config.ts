@@ -66,6 +66,10 @@ export default defineConfig({
         "project-analysis-worker": "./src/project-analysis-worker.ts",
       },
       deps: {
+        // tsdown <0.23 compatibility: resolve external dependency subpaths.
+        // Remove to preserve subpath imports as written (the new default).
+        // https://tsdown.dev/options/dependencies#deps-resolvedepsubpath
+        resolveDepSubpath: true,
         // Inline pure-JS CLI deps and the Ink/React renderer so the inspected
         // project cannot supply a missing or incompatible React peer. Native
         // dependencies, Yoga's WASM module, prompts (we monkey-patch it via
@@ -148,6 +152,10 @@ export default defineConfig({
     {
       entry: { index: "./src/index.ts" },
       deps: {
+        // tsdown <0.23 compatibility: resolve external dependency subpaths.
+        // Remove to preserve subpath imports as written (the new default).
+        // https://tsdown.dev/options/dependencies#deps-resolvedepsubpath
+        resolveDepSubpath: true,
         alwaysBundle: ["commander", "ora", "yaml"],
         neverBundle: [
           "@astrojs/compiler",
@@ -172,6 +180,10 @@ export default defineConfig({
     {
       entry: { "runtime-scan/browser-probe": "./src/cli/runtime-scan/browser-probe.ts" },
       deps: {
+        // tsdown <0.23 compatibility: resolve external dependency subpaths.
+        // Remove to preserve subpath imports as written (the new default).
+        // https://tsdown.dev/options/dependencies#deps-resolvedepsubpath
+        resolveDepSubpath: true,
         alwaysBundle: ["bippy", "react"],
       },
       clean: false,
@@ -183,6 +195,11 @@ export default defineConfig({
     },
   ],
   test: {
+    // Vitest v4 compatibility: preserve mock call history.
+    // Remove after tests no longer rely on calls from setup or earlier tests.
+    // https://release-v1-0-0-rc-0-viteplus-dev.voidzero-docs.workers.dev/guide/vitest-v5#remove-unneeded-compatibility-settings
+    // https://vitest.dev/guide/migration/#clearmocks-is-enabled-by-default
+    clearMocks: false,
     testTimeout: TEST_TIMEOUT_MS,
   },
 });

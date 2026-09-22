@@ -453,16 +453,15 @@ export const runInspect = <HooksR = never>(
               }),
             ),
           ).pipe(
-            Effect.map(
-              (diagnostics): SupplyChainForkResult => ({
-                diagnostics,
-                timedOut: false,
-              }),
-            ),
+            Effect.map((diagnostics): SupplyChainForkResult => ({
+              diagnostics,
+              timedOut: false,
+            })),
             Effect.timeout(supplyChainOverlapTimeout),
-            Effect.orElseSucceed(
-              (): SupplyChainForkResult => ({ diagnostics: [], timedOut: true }),
-            ),
+            Effect.orElseSucceed((): SupplyChainForkResult => ({
+              diagnostics: [],
+              timedOut: true,
+            })),
           )
         : Effect.succeed<SupplyChainForkResult>({
             diagnostics: [],
