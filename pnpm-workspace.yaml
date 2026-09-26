@@ -3,18 +3,42 @@ packages:
 
 minimumReleaseAge: 7200
 minimumReleaseAgeExclude:
-  - '@oxc-project/*'
+  - "@oxc-project/*"
   # ecosystem-ci smoke test: preview builds carry no provenance and are brand new
   - vite-plus
-  - '@voidzero-dev/*'
+  - "@voidzero-dev/*"
   - agent-install
+  - oxlint
+  - "@oxlint/*"
+  - oxlint-tsgolint
+  - "@oxlint-tsgolint/*"
+  - oxfmt
+  - "@oxfmt/*"
+  - vitest
+  - "@vitest/*"
 trustPolicy: no-downgrade
 blockExoticSubdeps: true
 
 overrides:
-  vite: npm:@voidzero-dev/vite-plus-core@^0.1.15
-  vitest: npm:@voidzero-dev/vite-plus-test@^0.1.15
+  vite@*: "catalog:"
+  vitest@*: "catalog:"
 trustPolicyExclude:
   # ecosystem-ci smoke test: preview builds carry no provenance and are brand new
   - vite-plus
-  - '@voidzero-dev/*'
+  - "@voidzero-dev/*"
+onlyBuiltDependencies:
+  - "@parcel/watcher"
+  - "@sentry/cli"
+  - esbuild
+  - unrs-resolver
+catalog:
+  vite: npm:@voidzero-dev/vite-plus-core@0.0.0-commit.dd71b05c0f66a3529d0da591363c1ee6be3ec17d
+  vitest: 5.0.1
+  vite-plus: 0.0.0-commit.dd71b05c0f66a3529d0da591363c1ee6be3ec17d
+peerDependencyRules:
+  allowAny:
+    - vite
+    - vitest
+  allowedVersions:
+    vite: "*"
+    vitest: "*"
