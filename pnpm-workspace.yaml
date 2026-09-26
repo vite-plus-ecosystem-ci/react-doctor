@@ -3,6 +3,10 @@ packages:
 
 minimumReleaseAge: 7200
 minimumReleaseAgeExclude:
+  - '@oxc-project/*'
+  # ecosystem-ci smoke test: preview builds carry no provenance and are brand new
+  - vite-plus
+  - '@voidzero-dev/*'
   - agent-install
 trustPolicy: no-downgrade
 blockExoticSubdeps: true
@@ -10,3 +14,7 @@ blockExoticSubdeps: true
 overrides:
   vite: npm:@voidzero-dev/vite-plus-core@^0.1.15
   vitest: npm:@voidzero-dev/vite-plus-test@^0.1.15
+trustPolicyExclude:
+  # ecosystem-ci smoke test: preview builds carry no provenance and are brand new
+  - vite-plus
+  - '@voidzero-dev/*'
