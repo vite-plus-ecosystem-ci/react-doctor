@@ -250,6 +250,9 @@ importers:
       '@types/node':
         specifier: ^25.6.0
         version: 25.6.0
+      oxfmt:
+        specifier: 0.72.0
+        version: 0.72.0(vite-plus@0.0.0-commit.7cb75b46f7a73413ee0803eaac3f6a6b6763f158(@opentelemetry/api@1.9.1)(@types/node@25.6.0)(@vitest/ui@5.0.3(vitest@5.0.3))(esbuild@0.28.1)(jiti@2.7.0)(terser@5.46.0)(tsx@4.22.4)(typescript@6.0.3)(yaml@2.9.0))
       vitest:
         specifier: 'catalog:'
         version: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@25.6.0)(@vitest/browser-preview@5.0.3)(@vitest/ui@5.0.3)(vite@7.3.1(@types/node@25.6.0)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.46.0)(tsx@4.22.4)(yaml@2.9.0))
@@ -1370,7 +1373,7 @@ packages:
     resolution: {integrity: sha512-aIYXQBo4lCbO4z0R3FHeucQHpF46l2LbMdxRvqvuRuW2OxdnSkcng5B8+K12spgLDj93rtN3+J2Vac/TIO+ciQ==}
 
   '@oxc-project/types@0.132.0':
-    resolution: {integrity: sha512-FESMOxil5Se014ui/Eq8fT5uHJo6nIRwH0PfJrZJXs6Gek3ZVFOrpUv3YIZT20m+extU98Hg1Ym72U58rlsxUQ==}
+    resolution: {integrity: sha512-FESMOxil5Se014ui/Eq8fT5uHJo6nIRwH0PfJrZJXs6Gek3ZVFOrpUv3YIZT20m+extU98Hg1Ym72U58rlsxUQ==, tarball: https://registry.npmjs.org/@oxc-project/types/-/types-0.132.0.tgz}
 
   '@oxc-project/types@0.148.0':
     resolution: {integrity: sha512-Nm4s/jB+4FpFsPhWGEC4h7rzksesmtnMXomo6rCMcg/b8zLQuOziRgkCS1fxDCXOlJB/6Q8oABOZ/OP6RIPj9A==}
@@ -3000,9 +3003,6 @@ packages:
     resolution: {integrity: sha512-f7ccFPK3SXFHpx15UIGyRJ/FJQctuKZ0zVuN3frBo4HnK3cay9VEW0R6yPYFHC0AgqhukPzKjq22t5DmAyqGyw==, tarball: https://registry.npmjs.org/flat-cache/-/flat-cache-4.0.1.tgz}
     engines: {node: '>=16'}
 
-  flatted@3.4.2:
-    resolution: {integrity: sha512-PjDse7RzhcPkIJwy5t7KPWQSZ9cAbzQXcafsetQoD7sOJRQlGikNbx7yZp2OotDnJyrDcbyRq3Ttb18iYOqkxA==, tarball: https://registry.npmjs.org/flatted/-/flatted-3.4.2.tgz}
-
   flatted@3.4.4:
     resolution: {integrity: sha512-5+ybhBZANEJxaH3X5evAFatUxLfEHSr7n6kYJ+1Qd0mUqr4eu9gIf6GDbWHf8RJijHrjjO8G+la14SlL2SeS1Q==, tarball: https://registry.npmjs.org/flatted/-/flatted-3.4.4.tgz}
 
@@ -3930,10 +3930,6 @@ packages:
   tinyexec@1.3.1:
     resolution: {integrity: sha512-GCvB3aoys96IuDFBMcTB46JOR6mdMtAToqwiW8JlWhsoh1mhHi/xn9ss/Dg7N555GiJyEt2qzoG/NHCwM6h1EA==, tarball: https://registry.npmjs.org/tinyexec/-/tinyexec-1.3.1.tgz}
     engines: {node: '>=18'}
-
-  tinyglobby@0.2.16:
-    resolution: {integrity: sha512-pn99VhoACYR8nFHhxqix+uvsbXineAasWm5ojXoN8xEwK5Kd3/TrhNn1wByuD52UxWRLy8pu+kRMniEi6Eq9Zg==, tarball: https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.16.tgz}
-    engines: {node: '>=12.0.0'}
 
   tinyglobby@0.2.17:
     resolution: {integrity: sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==, tarball: https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz}
@@ -6412,10 +6408,6 @@ snapshots:
     dependencies:
       reusify: 1.1.0
 
-  fdir@6.5.0(picomatch@4.0.4):
-    optionalDependencies:
-      picomatch: 4.0.4
-
   fdir@6.5.0(picomatch@4.0.7):
     optionalDependencies:
       picomatch: 4.0.7
@@ -6444,10 +6436,8 @@ snapshots:
 
   flat-cache@4.0.1:
     dependencies:
-      flatted: 3.4.2
+      flatted: 3.4.4
       keyv: 4.5.4
-
-  flatted@3.4.2: {}
 
   flatted@3.4.4: {}
 
@@ -7569,11 +7559,6 @@ snapshots:
 
   tinyexec@1.3.1: {}
 
-  tinyglobby@0.2.16:
-    dependencies:
-      fdir: 6.5.0(picomatch@4.0.4)
-      picomatch: 4.0.4
-
   tinyglobby@0.2.17:
     dependencies:
       fdir: 6.5.0(picomatch@4.0.7)
@@ -7735,11 +7720,11 @@ snapshots:
   vite@7.3.1(@types/node@25.6.0)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.46.0)(tsx@4.22.4)(yaml@2.9.0):
     dependencies:
       esbuild: 0.27.3
-      fdir: 6.5.0(picomatch@4.0.4)
-      picomatch: 4.0.4
+      fdir: 6.5.0(picomatch@4.0.7)
+      picomatch: 4.0.7
       postcss: 8.5.6
       rollup: 4.57.1
-      tinyglobby: 0.2.16
+      tinyglobby: 0.2.17
     optionalDependencies:
       '@types/node': 25.6.0
       fsevents: 2.3.3
