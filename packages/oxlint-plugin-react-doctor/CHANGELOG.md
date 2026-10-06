@@ -1,5 +1,59 @@
 # oxlint-plugin-react-doctor
 
+## 0.9.18
+
+### Patch Changes
+
+- [#1883](https://github.com/millionco/react-doctor/pull/1883) [`909b8e5`](https://github.com/millionco/react-doctor/commit/909b8e5f1bbbdfbd58f5f6b3bf0b031d1afd0c0b) Thanks [@skoshx](https://github.com/skoshx)! - fix(effect-needs-cleanup): accept Promise timer that resets its own handle in callback
+
+  Fixes [#1882](https://github.com/millionco/react-doctor/issues/1882). The rule no longer flags a timer created in a Promise callback when the timer's own callback resets the handle to `null` or `undefined`. This is safe because the timer has already fired when the reset happens, so no live handle is lost.
+
+- [#1869](https://github.com/millionco/react-doctor/pull/1869) [`7bebcfc`](https://github.com/millionco/react-doctor/commit/7bebcfc1e01445f8fde181e8b8cf1619f836955d) Thanks [@aidenybai](https://github.com/aidenybai)! - Use constant Boolean initializers before treating numeric-looking JSX guard names as numbers. Preserve warnings for mutable bindings, destructuring defaults, and numeric values.
+
+- [#1873](https://github.com/millionco/react-doctor/pull/1873) [`6790398`](https://github.com/millionco/react-doctor/commit/67903983c48c59129f08142734e63c9f005bd1ee) Thanks [@aidenybai](https://github.com/aidenybai)! - Require root route error boundaries only for data routers, since declarative useRoutes configurations do not use data-router error handling.
+
+- [#1875](https://github.com/millionco/react-doctor/pull/1875) [`ad8bca6`](https://github.com/millionco/react-doctor/commit/ad8bca6335a66f1aeb432b8bc3dd86f895f8f02c) Thanks [@aidenybai](https://github.com/aidenybai)! - Recognize legacy React.createClass components so render callbacks retain their instance this instead of being treated as function components.
+
+- [#1874](https://github.com/millionco/react-doctor/pull/1874) [`c92fec1`](https://github.com/millionco/react-doctor/commit/c92fec1c3ea96cf21ab761118d24358df2476eea) Thanks [@aidenybai](https://github.com/aidenybai)! - Accept direct anchor children owned by an imported Next Link component, including the legacy Link child API.
+
+- [#1872](https://github.com/millionco/react-doctor/pull/1872) [`2825dfd`](https://github.com/millionco/react-doctor/commit/2825dfd67e0049f3247cf033ea7769e4fc3ec90c) Thanks [@aidenybai](https://github.com/aidenybai)! - Allow state updater callbacks to reassign their local parameter while still reporting writes to prior-state properties and captured values.
+
+- [#1878](https://github.com/millionco/react-doctor/pull/1878) [`cc78fa3`](https://github.com/millionco/react-doctor/commit/cc78fa3bb38594bbeea7040fe1e144d19b0eaaf5) Thanks [@aidenybai](https://github.com/aidenybai)! - Respect the installed or declared React Native version before reporting removed AsyncStorage and WebView exports. Reuse package-version resolution and track manifests for diagnostic cache invalidation.
+
+- [#1871](https://github.com/millionco/react-doctor/pull/1871) [`4f8866c`](https://github.com/millionco/react-doctor/commit/4f8866ce3122b5155c0bd37756e030b952e9cddd) Thanks [@aidenybai](https://github.com/aidenybai)! - Stop reporting the core SafeAreaView export as removed. It remains implemented even where it is deprecated.
+
+- [#1880](https://github.com/millionco/react-doctor/pull/1880) [`96bf20f`](https://github.com/millionco/react-doctor/commit/96bf20fb5fe084d2ca436c1206fb34696226f15e) Thanks [@aidenybai](https://github.com/aidenybai)! - Restrict App Router path checks to the project app or src/app directory so nested Pages Router paths do not trigger App Router rules.
+
+- [#1877](https://github.com/millionco/react-doctor/pull/1877) [`4899bc4`](https://github.com/millionco/react-doctor/commit/4899bc4914bdf956c119ad360958ed83c40c537d) Thanks [@aidenybai](https://github.com/aidenybai)! - Recognize optional-chain and TypeScript-wrapped response status guards before fetch body reads.
+
+- [#1879](https://github.com/millionco/react-doctor/pull/1879) [`45f9769`](https://github.com/millionco/react-doctor/commit/45f97697cb966e6a0bf7214b95087ab09f483900) Thanks [@aidenybai](https://github.com/aidenybai)! - Avoid treating promise-returning query APIs as array find calls. Keep reports for known arrays and known predicates.
+
+- [#1866](https://github.com/millionco/react-doctor/pull/1866) [`dfb598a`](https://github.com/millionco/react-doctor/commit/dfb598a46bcc4865b639c1a347dbc681b673f819) Thanks [@aidenybai](https://github.com/aidenybai)! - Recognize static import and require paths wrapped in TypeScript assertions, while retaining warnings for dynamic paths inside those wrappers.
+
+- [#1870](https://github.com/millionco/react-doctor/pull/1870) [`a293fac`](https://github.com/millionco/react-doctor/commit/a293facac53cfd06840a75e57e18b263a629ef50) Thanks [@aidenybai](https://github.com/aidenybai)! - Preserve state used by a render-phase throw, including Suspense promises and errors, instead of recommending a ref.
+
+- [#1876](https://github.com/millionco/react-doctor/pull/1876) [`1b149ba`](https://github.com/millionco/react-doctor/commit/1b149bae5f6ecf350b689148b751f0e69afbdb3a) Thanks [@aidenybai](https://github.com/aidenybai)! - Recognize either global timer-clear API as releasing a matching timeout or interval handle, including exhaustive retained timer collections.
+
+- [#1867](https://github.com/millionco/react-doctor/pull/1867) [`888dc2a`](https://github.com/millionco/react-doctor/commit/888dc2a199a1cc6d6d75c30dbba1975936a2026f) Thanks [@aidenybai](https://github.com/aidenybai)! - Allow author-provided accessible names on the tooltip role. Preserve naming restrictions on roles that prohibit them and warnings for unsupported tooltip states.
+
+- [#1868](https://github.com/millionco/react-doctor/pull/1868) [`7e24c41`](https://github.com/millionco/react-doctor/commit/7e24c411ddc8a0cb4b99c70652fdc2fa26e5c891) Thanks [@aidenybai](https://github.com/aidenybai)! - Skip missing image sizes advice when next/image explicitly disables optimization, since that path does not generate responsive source candidates.
+
+- [#1888](https://github.com/millionco/react-doctor/pull/1888) [`e50ba27`](https://github.com/millionco/react-doctor/commit/e50ba271d99c9c27a132852c4d60f6484371cddd) Thanks [@aidenybai](https://github.com/aidenybai)! - A native wrapping or associated label can give a control its accessible name through its title. Recognize that name while keeping warnings for empty labels, unrelated labels, and custom wrappers.
+
+- [#1893](https://github.com/millionco/react-doctor/pull/1893) [`91b6991`](https://github.com/millionco/react-doctor/commit/91b6991584d6e5676bbf4c83022b58afe51d933d) Thanks [@aidenybai](https://github.com/aidenybai)! - A returned scalar formatter can use JSX only when its scalar input is null. React component props do not follow that path. Exclude these formatters while keeping warnings when JSX is reachable for normal props, a reassigned parameter, or another return path.
+
+- [#1894](https://github.com/millionco/react-doctor/pull/1894) [`d8c0517`](https://github.com/millionco/react-doctor/commit/d8c0517cbf594fd3b88486c116beb58ffcedb7c8) Thanks [@aidenybai](https://github.com/aidenybai)! - Avoid missing-key warnings for JSX arrays returned as data by module-level object factories with no local use. Keep warnings for component and render methods, local factory uses, and arrays rendered directly as children.
+
+- [#1891](https://github.com/millionco/react-doctor/pull/1891) [`0d99110`](https://github.com/millionco/react-doctor/commit/0d991100a78f74ecb834af1c0367d1d2046f32d3) Thanks [@aidenybai](https://github.com/aidenybai)! - A class render helper can receive indices from a numeric Array.from placeholder list. Accept these keys only when every visible use proves that placeholder source and the helper does not escape. Keep warnings for mutable data lists and unknown callers.
+
+- [#1887](https://github.com/millionco/react-doctor/pull/1887) [`712a08a`](https://github.com/millionco/react-doctor/commit/712a08a5f0f389424278ca3b3a1621437cee350e) Thanks [@aidenybai](https://github.com/aidenybai)! - A focusable action revealed by group hover also becomes visible when it receives keyboard focus. Accept its own focus or focus-visible opacity reveal when that reveal covers the hover scope. Keep warnings for hidden, invisible, non-focusable, and mismatched-scope controls.
+
+- [#1892](https://github.com/millionco/react-doctor/pull/1892) [`e6457e3`](https://github.com/millionco/react-doctor/commit/e6457e3572d872a157bb335b32f63cfdae31ee52) Thanks [@aidenybai](https://github.com/aidenybai)! - An updater may copy each state element before a local helper changes those fresh copies. Track that ownership through helper parameters and for-of loops. Keep warnings for shared objects, nested shared fields, replaced elements, and aliases that add shared values.
+
+- [#1889](https://github.com/millionco/react-doctor/pull/1889) [`d1cd769`](https://github.com/millionco/react-doctor/commit/d1cd7699164dbcd3b1f19ebd978a7aaefb0cb723) Thanks [@aidenybai](https://github.com/aidenybai)! - An icon button with a screen-reader-only label is not a text button for visual padding. Ignore hidden label text, but keep visible text and not-sr-only overrides in the check.
+
+- [#1890](https://github.com/millionco/react-doctor/pull/1890) [`0a8982b`](https://github.com/millionco/react-doctor/commit/0a8982be0bc2ba54975d10377daccbcff57eabf5) Thanks [@aidenybai](https://github.com/aidenybai)! - A stable local factory that returns a component or forwardRef component is a valid component export. Inspect the factory return paths and keep warnings for mixed returns, reassigned factories, and unknown factory outputs.
+
 ## 0.9.17
 
 ## 0.9.16
