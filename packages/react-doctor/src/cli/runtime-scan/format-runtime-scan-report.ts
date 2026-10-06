@@ -98,34 +98,26 @@ const formatJsonlReport = (report: RuntimeScanReport): string => {
       },
     },
     { schemaVersion: report.schemaVersion, kind: "summary", data: report.summary },
-    ...report.scriptHotspots.map(
-      (scriptHotspot): RuntimeScanJsonlRecord => ({
-        schemaVersion: report.schemaVersion,
-        kind: "script-hotspot",
-        data: scriptHotspot,
-      }),
-    ),
-    ...report.componentHotspots.map(
-      (componentHotspot): RuntimeScanJsonlRecord => ({
-        schemaVersion: report.schemaVersion,
-        kind: "component-hotspot",
-        data: componentHotspot,
-      }),
-    ),
-    ...report.longAnimationFrames.map(
-      (longAnimationFrame): RuntimeScanJsonlRecord => ({
-        schemaVersion: report.schemaVersion,
-        kind: "long-animation-frame",
-        data: longAnimationFrame,
-      }),
-    ),
-    ...report.interactions.map(
-      (interaction): RuntimeScanJsonlRecord => ({
-        schemaVersion: report.schemaVersion,
-        kind: "interaction",
-        data: interaction,
-      }),
-    ),
+    ...report.scriptHotspots.map((scriptHotspot): RuntimeScanJsonlRecord => ({
+      schemaVersion: report.schemaVersion,
+      kind: "script-hotspot",
+      data: scriptHotspot,
+    })),
+    ...report.componentHotspots.map((componentHotspot): RuntimeScanJsonlRecord => ({
+      schemaVersion: report.schemaVersion,
+      kind: "component-hotspot",
+      data: componentHotspot,
+    })),
+    ...report.longAnimationFrames.map((longAnimationFrame): RuntimeScanJsonlRecord => ({
+      schemaVersion: report.schemaVersion,
+      kind: "long-animation-frame",
+      data: longAnimationFrame,
+    })),
+    ...report.interactions.map((interaction): RuntimeScanJsonlRecord => ({
+      schemaVersion: report.schemaVersion,
+      kind: "interaction",
+      data: interaction,
+    })),
   ];
   return `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
 };

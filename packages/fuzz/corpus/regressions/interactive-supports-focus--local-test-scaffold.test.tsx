@@ -2,7 +2,7 @@
 // weakness: test-gating
 // source: PR #1304
 
-import { test } from "vitest";
+import { test } from "vite-plus/test";
 import { ProductComponent } from "../product-component";
 
 test("forwards interaction content", () => {
