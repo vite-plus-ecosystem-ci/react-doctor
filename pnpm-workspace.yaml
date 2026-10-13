@@ -3,6 +3,12 @@ packages:
 
 minimumReleaseAge: 7200
 minimumReleaseAgeExclude:
+  # ecosystem-ci smoke test: preview builds and freshly pinned toolchain packages
+  - tinybench
+  - yuku-core
+  - yuku-parser
+  - '@yuku-core/*'
+  - '@yuku-toolchain/*'
   - '@oxc-project/*'
   # ecosystem-ci smoke test: preview builds carry no provenance and are brand new
   - vite-plus
