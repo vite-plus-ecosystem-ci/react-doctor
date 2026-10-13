@@ -75,7 +75,8 @@
     "prompts": "^2.4.2",
     "typescript": ">=5.0.4 <6",
     "yaml": "^2.9.0",
-    "yoga-layout": "~3.2.1"
+    "yoga-layout": "~3.2.1",
+    "oxlint": ">=1.81.0 <1.82.0"
   },
   "devDependencies": {
     "@react-doctor/api": "workspace:*",
