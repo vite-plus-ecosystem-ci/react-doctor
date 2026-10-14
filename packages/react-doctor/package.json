@@ -70,13 +70,13 @@
     "magicast": "^0.5.3",
     "oxc-parser": "^0.148.0",
     "oxc-resolver": "^11.24.2",
+    "oxlint": ">=1.81.0 <1.82.0",
     "oxlint-plugin-react-doctor": "workspace:*",
     "playwright-core": "^1.62.1",
     "prompts": "^2.4.2",
     "typescript": ">=5.0.4 <6",
     "yaml": "^2.9.0",
-    "yoga-layout": "~3.2.1",
-    "oxlint": ">=1.81.0 <1.82.0"
+    "yoga-layout": "~3.2.1"
   },
   "devDependencies": {
     "@react-doctor/api": "workspace:*",

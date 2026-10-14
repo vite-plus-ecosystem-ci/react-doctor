@@ -46,13 +46,13 @@
     "micromark-extension-mdxjs-esm": "^3.0.0",
     "oxc-parser": "^0.148.0",
     "oxc-resolver": "^11.24.2",
+    "oxlint": ">=1.81.0 <1.82.0",
     "oxlint-plugin-react-doctor": "workspace:*",
     "parse5": "^8.0.1",
     "picocolors": "^1.1.1",
     "picomatch": "^4.0.4",
     "semver": "^7.7.4",
-    "typescript": ">=5.0.4 <7",
-    "oxlint": ">=1.81.0 <1.82.0"
+    "typescript": ">=5.0.4 <7"
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0-beta.102",
