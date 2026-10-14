@@ -59,3 +59,4 @@ packages/evals/.audit/
 
 .fpfn/
 .classification-cache/
+.vitest/

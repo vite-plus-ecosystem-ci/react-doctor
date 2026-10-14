@@ -5,29 +5,47 @@ minimumReleaseAge: 7200
 minimumReleaseAgeExclude:
   # ecosystem-ci smoke test: preview builds and freshly pinned toolchain packages
   - oxlint
-  - '@oxlint/*'
+  - "@oxlint/*"
   - oxfmt
-  - '@oxfmt/*'
+  - "@oxfmt/*"
   - oxlint-tsgolint
-  - '@oxlint-tsgolint/*'
+  - "@oxlint-tsgolint/*"
   # ecosystem-ci smoke test: preview builds and freshly pinned toolchain packages
   - tinybench
   - yuku-core
   - yuku-parser
-  - '@yuku-core/*'
-  - '@yuku-toolchain/*'
-  - '@oxc-project/*'
+  - "@yuku-core/*"
+  - "@yuku-toolchain/*"
+  - "@oxc-project/*"
   # ecosystem-ci smoke test: preview builds carry no provenance and are brand new
   - vite-plus
-  - '@voidzero-dev/*'
+  - "@voidzero-dev/*"
   - agent-install
+  - vitest
+  - "@vitest/*"
 trustPolicy: no-downgrade
 blockExoticSubdeps: true
 
 overrides:
-  vite: npm:@voidzero-dev/vite-plus-core@^0.1.15
-  vitest: npm:@voidzero-dev/vite-plus-test@^0.1.15
+  vite@*: "catalog:"
+  vitest@*: "catalog:"
 trustPolicyExclude:
   # ecosystem-ci smoke test: preview builds carry no provenance and are brand new
   - vite-plus
-  - '@voidzero-dev/*'
+  - "@voidzero-dev/*"
+onlyBuiltDependencies:
+  - "@parcel/watcher"
+  - "@sentry/cli"
+  - esbuild
+  - unrs-resolver
+catalog:
+  vite: npm:@voidzero-dev/vite-plus-core@0.0.0-commit.3b99001a24f162be6a4478c3b97f3d0eb81c96c8
+  vitest: 5.0.4
+  vite-plus: 0.0.0-commit.3b99001a24f162be6a4478c3b97f3d0eb81c96c8
+peerDependencyRules:
+  allowAny:
+    - vite
+    - vitest
+  allowedVersions:
+    vite: "*"
+    vitest: "*"
